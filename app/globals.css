@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  min-height: 100%;
+  background: #eef3f8;
+}
+
+body {
+  min-height: 100vh;
+  color: #11203b;
+  font-family:
+    "Manrope",
+    "Noto Sans TC",
+    "PingFang TC",
+    "Microsoft JhengHei",
+    sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(29, 143, 106, 0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(242, 181, 107, 0.12), transparent 22%),
+    linear-gradient(180deg, #f6f9fc 0%, #edf3f8 100%);
+}
+
+* {
+  border-color: #d7dfec;
+}
+
+input:not([type="checkbox"]),
+select,
+textarea {
+  @apply w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20;
+}
+
+button {
+  @apply transition;
+}

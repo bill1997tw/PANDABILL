@@ -1,0 +1,92 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_DATABASE_URL")
+}
+
+model Group {
+  id           String            @id @default(cuid())
+  name         String
+  lineJoinCode String            @unique
+  createdAt    DateTime          @default(now())
+  members      Member[]
+  expenses     Expense[]
+  lineBindings LineChatBinding[]
+}
+
+model Member {
+  id                   String                @id @default(cuid())
+  name                 String
+  paymentSettingsToken String?               @unique
+  createdAt            DateTime              @default(now())
+  groupId              String
+  group                Group                 @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  paidExpenses         Expense[]             @relation("ExpensePayer")
+  participations       ExpenseParticipant[]
+  paymentProfile       MemberPaymentProfile?
+
+  @@unique([groupId, name])
+  @@index([groupId, createdAt])
+}
+
+model MemberPaymentProfile {
+  id                 String   @id @default(cuid())
+  memberId           String   @unique
+  acceptBankTransfer Boolean  @default(false)
+  bankName           String?
+  bankAccount        String?
+  acceptLinePay      Boolean  @default(false)
+  linePayId          String?
+  acceptCash         Boolean  @default(true)
+  paymentNote        String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  member             Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+}
+
+model Expense {
+  id           String               @id @default(cuid())
+  title        String
+  notes        String?
+  amountCents  Int
+  createdAt    DateTime             @default(now())
+  groupId      String
+  payerId      String
+  group        Group                @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  payer        Member               @relation("ExpensePayer", fields: [payerId], references: [id], onDelete: Restrict)
+  participants ExpenseParticipant[]
+
+  @@index([groupId, createdAt])
+  @@index([payerId])
+}
+
+model ExpenseParticipant {
+  id         String   @id @default(cuid())
+  expenseId  String
+  memberId   String
+  shareCents Int
+  createdAt  DateTime @default(now())
+  expense    Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  member     Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, memberId])
+  @@index([memberId, createdAt])
+}
+
+model LineChatBinding {
+  id                     String   @id @default(cuid())
+  chatId                 String   @unique
+  chatType               String
+  lineUserId             String?
+  groupId                String
+  pendingDeleteExpenseId String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+  group                  Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, updatedAt])
+}

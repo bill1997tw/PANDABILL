@@ -1,0 +1,24 @@
+export function assertNonEmptyString(value: unknown, fieldName: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${fieldName}為必填。`);
+  }
+
+  return value.trim();
+}
+
+export function assertStringArray(value: unknown, fieldName: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${fieldName}至少需要一個項目。`);
+  }
+
+  const cleanValues = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (cleanValues.length === 0) {
+    throw new Error(`${fieldName}至少需要一個有效項目。`);
+  }
+
+  return Array.from(new Set(cleanValues));
+}
