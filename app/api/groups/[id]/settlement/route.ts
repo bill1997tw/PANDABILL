@@ -15,6 +15,7 @@ export async function GET(_: Request, { params }: Props) {
   }
 
   return ok({
+    activeLedger: group.activeLedger,
     memberStats: group.summary.memberBalances,
     memberBalances: group.summary.memberBalances,
     balances: group.summary.memberBalances.map((member) => ({

@@ -3,11 +3,11 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { parseJson } from "@/lib/api";
-import type { GroupListItem } from "@/types";
+import { EmptyState } from "@/components/empty-state";
 import { SectionCard } from "@/components/section-card";
 import { Toast } from "@/components/toast";
-import { EmptyState } from "@/components/empty-state";
+import { parseJson } from "@/lib/api";
+import type { GroupListItem } from "@/types";
 
 export function HomePage() {
   const [groups, setGroups] = useState<GroupListItem[]>([]);
@@ -79,10 +79,10 @@ export function HomePage() {
               Split Bill
             </p>
             <h1 className="mt-2 text-2xl font-semibold text-ink sm:text-3xl">
-              小團體記帳，打開就能直接用。
+              朋友分帳、旅遊記帳、活動帳本
             </h1>
             <p className="mt-2 text-sm leading-6 text-slate-500">
-              建立群組、加成員、記一筆支出，系統自動幫你整理誰該付誰多少。
+              同一個 LINE 群組可以反覆出遊、聚餐，但每次活動都拆成獨立帳本，不會混在一起。
             </p>
           </div>
           <div className="rounded-3xl bg-mist px-4 py-3 text-right">
@@ -93,9 +93,9 @@ export function HomePage() {
 
         <div className="mt-5 grid gap-3 sm:grid-cols-3">
           {[
-            ["旅遊", "交通、住宿、門票一起算"],
-            ["室友", "水電瓦斯與日用品平分"],
-            ["聚餐", "付款人和分攤名單一次搞定"]
+            ["多帳本", "同一個群組可以有很多本，旅遊、聚餐、活動都能分開記。"],
+            ["單一進行中", "每個群組同時間只會有一本目前帳本，避免記錯地方。"],
+            ["歷史封存", "舊帳本可結束、可封存，但資料不會消失。"]
           ].map(([title, description]) => (
             <div key={title} className="rounded-3xl bg-mist px-4 py-4">
               <p className="font-semibold text-ink">{title}</p>
@@ -108,7 +108,7 @@ export function HomePage() {
       <div className="mt-6">
         <SectionCard
           title="建立新群組"
-          description="像建立一個帳本一樣，先命名，接著就能開始記帳。"
+          description="先建立 LINE 群組對應的容器。建立後，請到 LINE 群組裡綁定並建立活動帳本。"
         >
           <form className="space-y-4" onSubmit={handleCreateGroup}>
             <div>
@@ -118,7 +118,7 @@ export function HomePage() {
               <input
                 value={name}
                 onChange={(event) => setName(event.target.value)}
-                placeholder="例如：日本旅遊團"
+                placeholder="例如：大學好友旅遊團"
                 maxLength={50}
               />
             </div>
@@ -137,15 +137,15 @@ export function HomePage() {
 
       <div className="mt-8">
         <SectionCard
-          title="你的群組"
-          description="點進去就能管理成員、新增支出，並查看即時結算結果。"
+          title="群組列表"
+          description="點進群組可查看成員、目前活動帳本、最近支出與結算。"
         >
           {loading ? (
-            <p className="text-sm text-slate-500">讀取中...</p>
+            <p className="text-sm text-slate-500">載入中...</p>
           ) : groups.length === 0 ? (
             <EmptyState
-              title="還沒有任何群組"
-              description="先建立一個群組，馬上開始記帳和分帳。"
+              title="目前還沒有群組"
+              description="建立第一個群組後，就能開始把旅遊和聚餐帳本分開管理。"
             />
           ) : (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -168,16 +168,23 @@ export function HomePage() {
                       {group.expenseCount} 筆支出
                     </span>
                   </div>
-                  <div className="mt-5 flex flex-wrap gap-3 text-sm text-slate-600">
-                    <span className="rounded-full bg-mist px-3 py-1">
-                      {group.memberCount} 位成員
-                    </span>
-                    <span className="rounded-full bg-mist px-3 py-1">
-                      LINE 綁定碼 {group.lineJoinCode}
-                    </span>
-                    <span className="rounded-full bg-mist px-3 py-1">
-                      查看詳情
-                    </span>
+
+                  <div className="mt-5 space-y-2 text-sm text-slate-600">
+                    <div className="flex flex-wrap gap-2">
+                      <span className="rounded-full bg-mist px-3 py-1">
+                        {group.memberCount} 位成員
+                      </span>
+                      <span className="rounded-full bg-mist px-3 py-1">
+                        {group.ledgerCount} 本帳本
+                      </span>
+                    </div>
+                    <p>LINE 綁定碼：{group.lineJoinCode}</p>
+                    <p>
+                      目前帳本：
+                      <span className="font-medium text-ink">
+                        {group.activeLedgerName ?? "尚未建立"}
+                      </span>
+                    </p>
                   </div>
                 </Link>
               ))}

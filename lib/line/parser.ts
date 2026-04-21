@@ -1,5 +1,19 @@
 import type { ParsedExpenseCommand, ParsedLineCommand } from "@/lib/line/types";
 
+const CHINESE_NUMBERS: Record<string, number> = {
+  一: 1,
+  二: 2,
+  兩: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+  十: 10
+};
+
 function normalize(text: string) {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -10,7 +24,7 @@ function parseParticipantNames(rawText?: string) {
   }
 
   const names = rawText
-    .split(/[,\u3001， ]+/)
+    .split(/[,\u3001/ ]+/)
     .map((name) => name.trim())
     .filter(Boolean);
 
@@ -19,19 +33,6 @@ function parseParticipantNames(rawText?: string) {
 
 function chineseNumberToArabic(input: string) {
   const normalized = input.trim();
-  const map: Record<string, number> = {
-    一: 1,
-    二: 2,
-    兩: 2,
-    三: 3,
-    四: 4,
-    五: 5,
-    六: 6,
-    七: 7,
-    八: 8,
-    九: 9,
-    十: 10
-  };
 
   if (/^\d+$/.test(normalized)) {
     return Number(normalized);
@@ -42,15 +43,15 @@ function chineseNumberToArabic(input: string) {
   }
 
   if (normalized.endsWith("十")) {
-    return (map[normalized[0]] ?? 0) * 10;
+    return (CHINESE_NUMBERS[normalized[0]] ?? 0) * 10;
   }
 
   if (normalized.includes("十")) {
     const [tens, ones] = normalized.split("十");
-    return (tens ? map[tens] ?? 1 : 1) * 10 + (ones ? map[ones] ?? 0 : 0);
+    return (tens ? CHINESE_NUMBERS[tens] ?? 1 : 1) * 10 + (ones ? CHINESE_NUMBERS[ones] ?? 0 : 0);
   }
 
-  return map[normalized] ?? Number.NaN;
+  return CHINESE_NUMBERS[normalized] ?? Number.NaN;
 }
 
 function parseExpensePayload(payload: string): ParsedExpenseCommand | null {
@@ -61,7 +62,7 @@ function parseExpensePayload(payload: string): ParsedExpenseCommand | null {
   }
 
   const match = normalized.match(
-    /^(?<title>.+?)\s+(?<amount>\d+(?:\.\d{1,2})?)\s+(?:(?<count>\d+|[一二兩三四五六七八九十]+)人\s+)?(?<payer>\S+)付款(?:\s+(?:參與|分攤)[:：]?(?<participants>.+))?$/u
+    /^(?<title>.+?)\s+(?<amount>\d+(?:\.\d{1,2})?)\s+(?:(?<count>\d+|[一二兩三四五六七八九十]+)人\s+)?(?<payer>\S+?)(?:付款|付)(?:\s+(?:參與|分攤)[:：]?\s*(?<participants>.+))?$/u
   );
 
   if (!match?.groups) {
@@ -84,18 +85,18 @@ function parseExpensePayload(payload: string): ParsedExpenseCommand | null {
 }
 
 function parseCompactExpense(text: string): ParsedExpenseCommand | null {
-  if (!/^7(?:[.、]|\s|$)/u.test(text) && !/^7\S/u.test(text)) {
+  if (!/^7(?:[:：\s]*)?.+/u.test(text)) {
     return null;
   }
 
-  const compact = text.replace(/^7(?:[.、\s:]*)/u, "").replace(/\s+/g, "");
+  const compact = text.replace(/^7(?:[:：\s]*)?/u, "").replace(/\s+/g, "");
 
   if (!compact) {
     return null;
   }
 
   const withCount = compact.match(
-    /^(?<title>[\p{Script=Han}A-Za-z]{1,4})(?<amount>\d+(?:\.\d{1,2})?)(?:(?<count>[一二兩三四五六七八九十\d]+)人)?(?<rest>[\p{Script=Han}A-Za-z]+)$/u
+    /^(?<title>[\p{Script=Han}A-Za-z]{1,8})(?<amount>\d+(?:\.\d{1,2})?)(?:(?<count>\d+|[一二兩三四五六七八九十]+)人)?(?<rest>[\p{Script=Han}A-Za-z]+)$/u
   );
 
   if (!withCount?.groups) {
@@ -103,15 +104,18 @@ function parseCompactExpense(text: string): ParsedExpenseCommand | null {
   }
 
   const rest = withCount.groups.rest;
-  const payerSplit = rest.split("付");
-  const payerName = payerSplit.length === 2 ? payerSplit[0] : undefined;
-  const compactMemberBlob = payerSplit.length === 2 ? payerSplit[1] : rest;
+  const payerMatch = rest.match(
+    /^(?<payer>[\p{Script=Han}A-Za-z]+?)(?:付款|付)(?<participants>[\p{Script=Han}A-Za-z]+)$/u
+  );
   const hasParticipantCount = Boolean(withCount.groups.count);
   const participantCount = hasParticipantCount
     ? chineseNumberToArabic(withCount.groups.count)
     : undefined;
 
-  if (hasParticipantCount && (!participantCount || !Number.isFinite(participantCount) || participantCount <= 0)) {
+  if (
+    hasParticipantCount &&
+    (!participantCount || !Number.isFinite(participantCount) || participantCount <= 0)
+  ) {
     return null;
   }
 
@@ -119,14 +123,14 @@ function parseCompactExpense(text: string): ParsedExpenseCommand | null {
     kind: "expense",
     title: withCount.groups.title,
     amount: withCount.groups.amount,
-    payerName,
+    payerName: payerMatch?.groups?.payer,
     participantCount,
-    compactMemberBlob
+    compactMemberBlob: payerMatch?.groups?.participants ?? rest
   };
 }
 
 function parseExpense(text: string): ParsedExpenseCommand | null {
-  if (/^支出(?:\s|:|：|$)/u.test(text)) {
+  if (/^支出(?:\s|[:：]|$)/u.test(text)) {
     return parseExpensePayload(text.replace(/^支出(?:\s*[:：])?\s*/u, ""));
   }
 
@@ -136,16 +140,16 @@ function parseExpense(text: string): ParsedExpenseCommand | null {
 function parseAddMember(text: string): ParsedLineCommand | null {
   const normalized = normalize(text);
 
-  if (normalized === "8" || normalized === "8." || normalized === "8、") {
+  if (normalized === "8") {
     return { kind: "add-member-help" };
   }
 
   let payload = "";
 
-  if (/^新增成員(?:\s|:|：|$)/u.test(normalized)) {
+  if (/^新增成員(?:\s|[:：]|$)/u.test(normalized)) {
     payload = normalized.replace(/^新增成員(?:\s*[:：])?\s*/u, "");
-  } else if (/^8(?:[.、\s:]*)\S+/u.test(normalized)) {
-    payload = normalized.replace(/^8(?:[.、\s:]*)/u, "");
+  } else if (/^8\S+/u.test(normalized)) {
+    payload = normalized.replace(/^8/u, "");
   } else {
     return null;
   }
@@ -154,22 +158,23 @@ function parseAddMember(text: string): ParsedLineCommand | null {
     return { kind: "add-member", names: [] };
   }
 
-  const names = payload
-    .split(/[,\u3001， ]+/)
-    .map((name) => name.trim())
-    .filter(Boolean);
-
-  return { kind: "add-member", names };
+  return {
+    kind: "add-member",
+    names: payload
+      .split(/[,\u3001 ]+/)
+      .map((name) => name.trim())
+      .filter(Boolean)
+  };
 }
 
 function parseDeleteMember(text: string): ParsedLineCommand | null {
   const normalized = normalize(text);
 
-  if (normalized === "9" || normalized === "9." || normalized === "9、") {
+  if (normalized === "9") {
     return { kind: "delete-member-help" };
   }
 
-  if (/^刪除成員(?:\s|:|：|$)/u.test(normalized)) {
+  if (/^刪除成員(?:\s|[:：]|$)/u.test(normalized)) {
     return {
       kind: "delete-member",
       name: normalized.replace(/^刪除成員(?:\s*[:：])?\s*/u, "")
@@ -183,41 +188,10 @@ function parseDeleteMember(text: string): ParsedLineCommand | null {
     };
   }
 
-  if (/^9(?:[.、\s:]*)\S+/u.test(normalized)) {
+  if (/^9\S+/u.test(normalized)) {
     return {
       kind: "delete-member",
-      name: normalized.replace(/^9(?:[.、\s:]*)/u, "")
-    };
-  }
-
-  return null;
-}
-
-function parsePaymentSettingsLink(text: string): ParsedLineCommand | null {
-  const normalized = normalize(text);
-
-  if (normalized === "10" || normalized === "10." || normalized === "10、") {
-    return { kind: "payment-settings-help" };
-  }
-
-  if (/^付款設定(?:\s|:|：|$)/u.test(normalized)) {
-    return {
-      kind: "payment-settings-link",
-      name: normalized.replace(/^付款設定(?:\s*[:：])?\s*/u, "")
-    };
-  }
-
-  if (/^收款設定(?:\s|:|：|$)/u.test(normalized)) {
-    return {
-      kind: "payment-settings-link",
-      name: normalized.replace(/^收款設定(?:\s*[:：])?\s*/u, "")
-    };
-  }
-
-  if (/^10(?:[.、\s:]*)\S+/u.test(normalized)) {
-    return {
-      kind: "payment-settings-link",
-      name: normalized.replace(/^10(?:[.、\s:]*)/u, "")
+      name: normalized.replace(/^9/u, "")
     };
   }
 
@@ -227,21 +201,21 @@ function parsePaymentSettingsLink(text: string): ParsedLineCommand | null {
 function parseCreateGroup(text: string): ParsedLineCommand | null {
   const normalized = normalize(text);
 
-  if (normalized === "1" || normalized === "1." || normalized === "1、") {
+  if (normalized === "1") {
     return { kind: "create-group-help" };
   }
 
-  if (/^建立群組(?:\s|:|：|$)/u.test(normalized)) {
+  if (/^建立群組(?:\s|[:：]|$)/u.test(normalized)) {
     return {
       kind: "create-group",
       name: normalized.replace(/^建立群組(?:\s*[:：])?\s*/u, "")
     };
   }
 
-  if (/^1(?:[.、\s:]|\D)\S*/u.test(normalized) && !/^10(?:[.、\s:]*)\S*/u.test(normalized)) {
+  if (/^1(?!0)\S+/u.test(normalized)) {
     return {
       kind: "create-group",
-      name: normalized.replace(/^1(?:[.、\s:]*)/u, "")
+      name: normalized.replace(/^1/u, "")
     };
   }
 
@@ -251,22 +225,69 @@ function parseCreateGroup(text: string): ParsedLineCommand | null {
 function parseBind(text: string): ParsedLineCommand | null {
   const normalized = normalize(text);
 
-  if (normalized === "2" || normalized === "2." || normalized === "2、") {
+  if (normalized === "2") {
     return { kind: "bind-help" };
   }
 
-  if (/^綁定群組(?:\s|:|：|$)/u.test(normalized)) {
+  if (/^綁定群組(?:\s|[:：]|$)/u.test(normalized)) {
     return {
       kind: "bind",
       target: normalized.replace(/^綁定群組(?:\s*[:：])?\s*/u, "")
     };
   }
 
-  if (/^2(?:[.、\s:]*)\S+/u.test(normalized)) {
+  if (/^2\S+/u.test(normalized)) {
     return {
       kind: "bind",
-      target: normalized.replace(/^2(?:[.、\s:]*)/u, "")
+      target: normalized.replace(/^2/u, "")
     };
+  }
+
+  return null;
+}
+
+function parseLedgerCommands(text: string): ParsedLineCommand | null {
+  const normalized = normalize(text);
+
+  if (/^(建立活動|建立帳本)(?:\s|[:：]|$)/u.test(normalized)) {
+    return {
+      kind: "create-ledger",
+      name: normalized.replace(/^(建立活動|建立帳本)(?:\s*[:：])?\s*/u, "")
+    };
+  }
+
+  if (/^(切換活動|切換帳本)(?:\s|[:：]|$)/u.test(normalized)) {
+    return {
+      kind: "switch-ledger",
+      name: normalized.replace(/^(切換活動|切換帳本)(?:\s*[:：])?\s*/u, "")
+    };
+  }
+
+  if (normalized === "目前活動" || normalized === "目前帳本") {
+    return { kind: "current-ledger" };
+  }
+
+  if (
+    normalized === "查看帳本" ||
+    normalized === "帳本列表" ||
+    normalized === "查看活動"
+  ) {
+    return { kind: "list-ledgers" };
+  }
+
+  if (normalized === "結束活動" || normalized === "關閉帳本") {
+    return { kind: "close-ledger" };
+  }
+
+  if (/^(封存帳本|封存活動)(?:\s|[:：]|$)/u.test(normalized)) {
+    return {
+      kind: "archive-ledger",
+      name: normalized.replace(/^(封存帳本|封存活動)(?:\s*[:：])?\s*/u, "")
+    };
+  }
+
+  if (normalized === "查看歷史帳本" || normalized === "查看封存帳本") {
+    return { kind: "list-archived-ledgers" };
   }
 
   return null;
@@ -296,7 +317,8 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     normalized === "y" ||
     normalized === "Y" ||
     normalized === "yes" ||
-    normalized === "YES"
+    normalized === "YES" ||
+    normalized === "確認刪除"
   ) {
     return { kind: "confirm-delete" };
   }
@@ -306,58 +328,52 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     normalized === "n" ||
     normalized === "N" ||
     normalized === "no" ||
-    normalized === "NO"
+    normalized === "NO" ||
+    normalized === "取消刪除"
   ) {
     return { kind: "cancel-delete" };
   }
 
-  if (
-    normalized === "3" ||
-    normalized === "3." ||
-    normalized === "查看結算" ||
-    normalized === "結算"
-  ) {
+  if (normalized === "取消設定" || normalized === "取消設定收款") {
+    return { kind: "cancel-payment-setup" };
+  }
+
+  if (/^我是.+/u.test(normalized)) {
+    return {
+      kind: "identify-self",
+      name: normalized.replace(/^我是/u, "").trim()
+    };
+  }
+
+  if (normalized === "10" || normalized === "設定收款" || normalized === "更改付款方式") {
+    return { kind: "start-payment-setup" };
+  }
+
+  if (normalized === "11" || normalized === "查看我的付款方式") {
+    return { kind: "view-my-payment-settings" };
+  }
+
+  if (normalized === "3" || normalized === "查看結算" || normalized === "結算") {
     return { kind: "settlement" };
   }
 
-  if (
-    normalized === "4" ||
-    normalized === "4." ||
-    normalized === "查看最近支出" ||
-    normalized === "最近支出"
-  ) {
+  if (normalized === "4" || normalized === "查看最近支出" || normalized === "最近支出") {
     return { kind: "recent-expenses" };
   }
 
-  if (
-    normalized === "5" ||
-    normalized === "5." ||
-    normalized === "查看成員" ||
-    normalized === "成員" ||
-    normalized === "成員列表"
-  ) {
+  if (normalized === "5" || normalized === "查看成員" || normalized === "成員") {
     return { kind: "list-members" };
   }
 
   if (
     normalized === "6" ||
-    normalized === "6." ||
     normalized === "刪除最後一筆支出" ||
-    normalized === "刪最後一筆支出" ||
-    normalized === "刪除最後一筆" ||
-    normalized === "刪最後一筆"
+    normalized === "刪除最後一筆"
   ) {
     return { kind: "delete-last-expense" };
   }
 
-  if (
-    normalized === "7" ||
-    normalized === "7." ||
-    normalized === "7、" ||
-    normalized === "支出" ||
-    normalized === "支出:" ||
-    normalized === "支出："
-  ) {
+  if (normalized === "7" || normalized === "支出") {
     return { kind: "expense-help" };
   }
 
@@ -371,9 +387,9 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return deleteMemberCommand;
   }
 
-  const paymentSettingsLinkCommand = parsePaymentSettingsLink(normalized);
-  if (paymentSettingsLinkCommand) {
-    return paymentSettingsLinkCommand;
+  const ledgerCommand = parseLedgerCommands(normalized);
+  if (ledgerCommand) {
+    return ledgerCommand;
   }
 
   const createGroupCommand = parseCreateGroup(normalized);

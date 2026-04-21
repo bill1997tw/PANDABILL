@@ -15,7 +15,7 @@ export function serializePaymentProfile(profile: PaymentProfileInput) {
 
   const hasAnyMethod =
     (profile.acceptBankTransfer && Boolean(profile.bankAccount)) ||
-    (profile.acceptLinePay && Boolean(profile.linePayId)) ||
+    profile.acceptLinePay ||
     profile.acceptCash;
 
   return {

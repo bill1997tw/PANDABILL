@@ -1,32 +1,9 @@
-import { createGroup } from "@/lib/group-service";
-import { db } from "@/lib/db";
+import { createGroup, getGroupListData } from "@/lib/group-service";
 import { fail, ok } from "@/lib/http";
 
 export async function GET() {
-  const groups = await db.group.findMany({
-    orderBy: {
-      createdAt: "desc"
-    },
-    include: {
-      _count: {
-        select: {
-          members: true,
-          expenses: true
-        }
-      }
-    }
-  });
-
-  return ok({
-    groups: groups.map((group) => ({
-      id: group.id,
-      name: group.name,
-      lineJoinCode: group.lineJoinCode,
-      createdAt: group.createdAt.toISOString(),
-      memberCount: group._count.members,
-      expenseCount: group._count.expenses
-    }))
-  });
+  const groups = await getGroupListData();
+  return ok({ groups });
 }
 
 export async function POST(request: Request) {
@@ -42,14 +19,16 @@ export async function POST(request: Request) {
           lineJoinCode: group.lineJoinCode,
           createdAt: group.createdAt.toISOString(),
           memberCount: 0,
-          expenseCount: 0
+          expenseCount: 0,
+          ledgerCount: 0,
+          activeLedgerName: null
         }
       },
       { status: 201 }
     );
   } catch (error) {
     return fail(
-      error instanceof Error ? error.message : "建立群組失敗，請稍後再試。"
+      error instanceof Error ? error.message : "建立群組失敗，請再試一次。"
     );
   }
 }

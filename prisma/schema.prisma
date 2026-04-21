@@ -8,14 +8,41 @@ datasource db {
   directUrl = env("DIRECT_DATABASE_URL")
 }
 
+enum LedgerStatus {
+  active
+  closed
+  archived
+}
+
 model Group {
   id           String            @id @default(cuid())
   name         String
   lineJoinCode String            @unique
   createdAt    DateTime          @default(now())
   members      Member[]
+  ledgers      Ledger[]
   expenses     Expense[]
   lineBindings LineChatBinding[]
+}
+
+model Ledger {
+  id         String       @id @default(cuid())
+  groupId    String
+  name       String
+  status     LedgerStatus @default(active)
+  startedAt  DateTime     @default(now())
+  endedAt    DateTime?
+  archivedAt DateTime?
+  isActive   Boolean      @default(false)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  group      Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  expenses   Expense[]
+
+  @@unique([groupId, name])
+  @@index([groupId, isActive])
+  @@index([groupId, status, updatedAt])
+  @@index([groupId, createdAt])
 }
 
 model Member {
@@ -48,6 +75,24 @@ model MemberPaymentProfile {
   member             Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
 }
 
+model LineUserProfile {
+  id                 String   @id @default(cuid())
+  lineUserId         String   @unique
+  memberName         String?
+  acceptBankTransfer Boolean  @default(false)
+  bankName           String?
+  bankAccount        String?
+  acceptLinePay      Boolean  @default(false)
+  acceptCash         Boolean  @default(true)
+  paymentNote        String?
+  setupState         String?
+  setupDraft         Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([memberName])
+}
+
 model Expense {
   id           String               @id @default(cuid())
   title        String
@@ -55,12 +100,15 @@ model Expense {
   amountCents  Int
   createdAt    DateTime             @default(now())
   groupId      String
+  ledgerId     String
   payerId      String
   group        Group                @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  ledger       Ledger               @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
   payer        Member               @relation("ExpensePayer", fields: [payerId], references: [id], onDelete: Restrict)
   participants ExpenseParticipant[]
 
   @@index([groupId, createdAt])
+  @@index([ledgerId, createdAt])
   @@index([payerId])
 }
 

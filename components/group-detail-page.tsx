@@ -10,8 +10,8 @@ import { parseJson } from "@/lib/api";
 import type {
   ExpenseDto,
   GroupDetailDto,
+  LedgerDto,
   MemberBalanceDto,
-  MemberDto,
   MemberPaymentProfileDto,
   SettlementDto
 } from "@/types";
@@ -34,42 +34,6 @@ type SettlementResponse = {
   totalExpenseDisplay: string;
 };
 
-type PaymentProfileForm = {
-  acceptBankTransfer: boolean;
-  bankName: string;
-  bankAccount: string;
-  acceptLinePay: boolean;
-  linePayId: string;
-  acceptCash: boolean;
-  paymentNote: string;
-};
-
-const defaultPaymentProfileForm: PaymentProfileForm = {
-  acceptBankTransfer: false,
-  bankName: "",
-  bankAccount: "",
-  acceptLinePay: false,
-  linePayId: "",
-  acceptCash: true,
-  paymentNote: ""
-};
-
-function paymentProfileToForm(profile: MemberPaymentProfileDto | null): PaymentProfileForm {
-  if (!profile) {
-    return defaultPaymentProfileForm;
-  }
-
-  return {
-    acceptBankTransfer: profile.acceptBankTransfer,
-    bankName: profile.bankName ?? "",
-    bankAccount: profile.bankAccount ?? "",
-    acceptLinePay: profile.acceptLinePay,
-    linePayId: profile.linePayId ?? "",
-    acceptCash: profile.acceptCash,
-    paymentNote: profile.paymentNote ?? ""
-  };
-}
-
 export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
   const [data, setData] = useState<GroupDetailDto | null>(null);
   const [settlement, setSettlement] = useState<SettlementResponse | null>(null);
@@ -79,8 +43,6 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
   const [memberName, setMemberName] = useState("");
   const [memberSubmitting, setMemberSubmitting] = useState(false);
   const [expenseSubmitting, setExpenseSubmitting] = useState(false);
-  const [savingProfileId, setSavingProfileId] = useState<string | null>(null);
-  const [paymentForms, setPaymentForms] = useState<Record<string, PaymentProfileForm>>({});
   const [expenseForm, setExpenseForm] = useState({
     title: "",
     amount: "",
@@ -109,14 +71,6 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
 
       setData(groupData);
       setSettlement(settlementData);
-      setPaymentForms(
-        Object.fromEntries(
-          groupData.members.map((member) => [
-            member.id,
-            paymentProfileToForm(member.paymentProfile)
-          ])
-        )
-      );
 
       if (!expenseForm.payerId && groupData.members[0]) {
         setExpenseForm((current) => ({
@@ -143,6 +97,8 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
   const expenses = data?.expenses ?? [];
   const canCreateExpense = members.length > 0;
   const totalExpenseDisplay = settlement?.totalExpenseDisplay ?? "0.00";
+  const activeLedger = data?.activeLedger ?? null;
+  const ledgers = data?.ledgers ?? [];
 
   const selectedParticipants = useMemo(
     () => new Set(expenseForm.participantIds),
@@ -165,6 +121,7 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
           body: JSON.stringify({ name: memberName })
         })
       );
+
       setMemberName("");
       setNotice("成員新增成功。");
       await loadGroup();
@@ -251,43 +208,6 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
     });
   }
 
-  function updatePaymentForm(memberId: string, patch: Partial<PaymentProfileForm>) {
-    setPaymentForms((current) => ({
-      ...current,
-      [memberId]: {
-        ...(current[memberId] ?? defaultPaymentProfileForm),
-        ...patch
-      }
-    }));
-  }
-
-  async function handleSavePaymentProfile(member: MemberDto) {
-    const form = paymentForms[member.id] ?? defaultPaymentProfileForm;
-    setSavingProfileId(member.id);
-    setError(null);
-    setNotice(null);
-
-    try {
-      await parseJson(
-        await fetch(`/api/members/${member.id}/payment-profile`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(form)
-        })
-      );
-      setNotice(`${member.name} 的收款設定已更新。`);
-      await loadGroup();
-    } catch (saveError) {
-      setError(
-        saveError instanceof Error ? saveError.message : "更新收款設定失敗。"
-      );
-    } finally {
-      setSavingProfileId(null);
-    }
-  }
-
   return (
     <main className="mx-auto min-h-screen max-w-7xl px-4 pb-28 pt-6 sm:px-6 lg:px-8">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -304,6 +224,7 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
               : "正在載入群組資訊..."}
           </p>
         </div>
+
         <div className="flex items-center gap-3">
           <a
             href="#expense-form"
@@ -318,6 +239,9 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
             <p className="mt-2 text-2xl font-semibold text-ink">
               {data?.group.name ?? "載入中"}
             </p>
+            <p className="mt-2 text-sm font-medium text-ink">
+              目前帳本：{activeLedger?.name ?? "尚未建立"}
+            </p>
             <p className="mt-1 text-sm text-slate-500">總支出 NT$ {totalExpenseDisplay}</p>
           </div>
         </div>
@@ -329,8 +253,8 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
           {notice ? <Toast tone="success" message={notice} /> : null}
 
           <SectionCard
-            title="2. 成員列表與收款設定"
-            description="每個人都能自訂自己接受的付款方式。結算時，系統會直接把對應收款資訊帶出來。"
+            title="2. 成員列表"
+            description="群組內負責分帳的人名單。付款方式請每位成員自行私聊 Bot 輸入「10」或「設定收款」設定，之後新群組也會沿用。"
           >
             <form className="flex flex-col gap-3 sm:flex-row" onSubmit={handleAddMember}>
               <input
@@ -363,20 +287,33 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
               )}
             </div>
 
-            {members.length > 0 ? (
-              <div className="mt-5 space-y-4">
-                {members.map((member) => (
-                  <PaymentProfileEditor
-                    key={member.id}
-                    member={member}
-                    form={paymentForms[member.id] ?? defaultPaymentProfileForm}
-                    saving={savingProfileId === member.id}
-                    onChange={(patch) => updatePaymentForm(member.id, patch)}
-                    onSave={() => handleSavePaymentProfile(member)}
-                  />
+            <div className="mt-5 rounded-3xl border border-dashed border-line bg-mist px-4 py-4 text-sm leading-6 text-slate-600">
+              <p className="font-semibold text-ink">付款方式設定改成私聊 Bot</p>
+              <p className="mt-2">
+                每位成員只要私聊 Bot 輸入 <span className="font-semibold text-ink">10</span>、
+                <span className="font-semibold text-ink">設定收款</span> 或
+                <span className="font-semibold text-ink">更改付款方式</span>，
+                就能設定自己的銀行、LINE Pay 是否可收、現金是否可收。設定一次，之後新群組也會沿用。
+              </p>
+            </div>
+          </SectionCard>
+
+          <SectionCard
+            title="活動帳本"
+            description="同一個群組可以有很多本帳，但同時間只會有一本是目前進行中。LINE 群組裡可用「建立活動」、「切換活動」、「結束活動」、「封存帳本」。"
+          >
+            {ledgers.length === 0 ? (
+              <EmptyState
+                title="目前還沒有活動帳本"
+                description="請在 LINE 群組輸入：建立活動 活動名稱"
+              />
+            ) : (
+              <div className="space-y-3">
+                {ledgers.map((ledger) => (
+                  <LedgerItem key={ledger.id} ledger={ledger} />
                 ))}
               </div>
-            ) : null}
+            )}
           </SectionCard>
 
           <SectionCard
@@ -394,117 +331,128 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
                 description="請先建立至少一位成員，才能開始記帳。"
               />
             ) : (
-              <form
-                id="expense-form"
-                className="scroll-mt-24 space-y-4"
-                onSubmit={handleAddExpense}
-              >
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div>
-                    <label className="mb-2 block text-sm font-medium text-ink">
-                      1. 用途
-                    </label>
-                    <input
-                      value={expenseForm.title}
-                      onChange={(event) =>
-                        setExpenseForm((current) => ({
-                          ...current,
-                          title: event.target.value
-                        }))
-                      }
-                      placeholder="例如：晚餐"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-2 block text-sm font-medium text-ink">
-                      2. 金額
-                    </label>
-                    <input
-                      inputMode="decimal"
-                      value={expenseForm.amount}
-                      onChange={(event) =>
-                        setExpenseForm((current) => ({
-                          ...current,
-                          amount: event.target.value
-                        }))
-                      }
-                      placeholder="例如：600 或 128.50"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div>
-                    <label className="mb-2 block text-sm font-medium text-ink">
-                      3. 付款人
-                    </label>
-                    <select
-                      value={expenseForm.payerId}
-                      onChange={(event) =>
-                        setExpenseForm((current) => ({
-                          ...current,
-                          payerId: event.target.value
-                        }))
-                      }
-                    >
-                      <option value="">請選擇付款人</option>
-                      {members.map((member) => (
-                        <option key={member.id} value={member.id}>
-                          {member.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-2 block text-sm font-medium text-ink">
-                      備註
-                    </label>
-                    <input
-                      value={expenseForm.notes}
-                      onChange={(event) =>
-                        setExpenseForm((current) => ({
-                          ...current,
-                          notes: event.target.value
-                        }))
-                      }
-                      placeholder="可選填，例如：居酒屋二次會"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <label className="block text-sm font-medium text-ink">
-                      4. 分攤成員
-                    </label>
-                    <span className="text-xs text-slate-500">至少勾選 1 人</span>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {members.map((member) => (
-                      <label
-                        key={member.id}
-                        className="flex items-center gap-3 rounded-2xl border border-line bg-mist px-4 py-3"
-                      >
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 rounded border-line"
-                          checked={selectedParticipants.has(member.id)}
-                          onChange={() => toggleParticipant(member.id)}
-                        />
-                        <span className="text-sm text-ink">{member.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={expenseSubmitting}
-                  className="inline-flex w-full items-center justify-center rounded-2xl bg-accent px-4 py-4 text-base font-semibold text-white hover:bg-accent/90 disabled:cursor-not-allowed disabled:bg-slate-300"
+              activeLedger ? (
+                <form
+                  id="expense-form"
+                  className="scroll-mt-24 space-y-4"
+                  onSubmit={handleAddExpense}
                 >
-                  {expenseSubmitting ? "送出中..." : "5. 送出支出"}
-                </button>
-              </form>
+                  <div className="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">
+                    目前會記到帳本：<span className="font-semibold text-ink">{activeLedger.name}</span>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-ink">
+                        1. 用途
+                      </label>
+                      <input
+                        value={expenseForm.title}
+                        onChange={(event) =>
+                          setExpenseForm((current) => ({
+                            ...current,
+                            title: event.target.value
+                          }))
+                        }
+                        placeholder="例如：晚餐"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-ink">
+                        2. 金額
+                      </label>
+                      <input
+                        inputMode="decimal"
+                        value={expenseForm.amount}
+                        onChange={(event) =>
+                          setExpenseForm((current) => ({
+                            ...current,
+                            amount: event.target.value
+                          }))
+                        }
+                        placeholder="例如：600 或 128.50"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-ink">
+                        3. 付款人
+                      </label>
+                      <select
+                        value={expenseForm.payerId}
+                        onChange={(event) =>
+                          setExpenseForm((current) => ({
+                            ...current,
+                            payerId: event.target.value
+                          }))
+                        }
+                      >
+                        <option value="">請選擇付款人</option>
+                        {members.map((member) => (
+                          <option key={member.id} value={member.id}>
+                            {member.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-ink">
+                        備註
+                      </label>
+                      <input
+                        value={expenseForm.notes}
+                        onChange={(event) =>
+                          setExpenseForm((current) => ({
+                            ...current,
+                            notes: event.target.value
+                          }))
+                        }
+                        placeholder="可選填，例如：居酒屋二次會"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <label className="block text-sm font-medium text-ink">
+                        4. 分攤成員
+                      </label>
+                      <span className="text-xs text-slate-500">至少勾選 1 人</span>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {members.map((member) => (
+                        <label
+                          key={member.id}
+                          className="flex items-center gap-3 rounded-2xl border border-line bg-mist px-4 py-3"
+                        >
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-line"
+                            checked={selectedParticipants.has(member.id)}
+                            onChange={() => toggleParticipant(member.id)}
+                          />
+                          <span className="text-sm text-ink">{member.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={expenseSubmitting}
+                    className="inline-flex w-full items-center justify-center rounded-2xl bg-accent px-4 py-4 text-base font-semibold text-white hover:bg-accent/90 disabled:cursor-not-allowed disabled:bg-slate-300"
+                  >
+                    {expenseSubmitting ? "送出中..." : "5. 送出支出"}
+                  </button>
+                </form>
+              ) : (
+                <EmptyState
+                  title="目前沒有進行中的帳本"
+                  description="請先在 LINE 群組輸入：建立活動 活動名稱。建立後，這裡的新支出才會記到正確帳本。"
+                />
+              )
             )}
           </SectionCard>
 
@@ -517,7 +465,11 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
             ) : expenses.length === 0 ? (
               <EmptyState
                 title="目前沒有支出"
-                description="新增第一筆支出後，這裡會顯示完整紀錄與分攤成員。"
+                description={
+                  activeLedger
+                    ? `新增第一筆支出後，這裡會顯示「${activeLedger.name}」的完整紀錄與分攤成員。`
+                    : "目前沒有進行中的帳本，請先建立活動。"
+                }
               />
             ) : (
               <div className="space-y-4">
@@ -585,7 +537,7 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
 
           <SectionCard
             title="6. 最終誰該付誰"
-            description="系統會把債務整理成較少筆轉帳，並直接帶出收款人願意接受的付款方式。"
+            description="系統會把債務關係整理成較少筆轉帳。銀行帳號會完整顯示，方便在手機直接複製貼上。"
           >
             {settlement?.transfers.length ? (
               <div className="space-y-3">
@@ -611,22 +563,32 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
           </SectionCard>
 
           <SectionCard
-            title="LINE Bot 綁定"
-            description="把 LINE 聊天室綁到這個群組後，就能直接在 LINE 用文字快速記帳。"
+            title="LINE Bot 操作"
+            description="正式上線後，不需要再打開外部付款設定頁。每位成員只要私聊 Bot 設定一次，之後每次結算都會沿用。"
           >
-            <div className="rounded-3xl bg-mist p-4">
-              <p className="text-sm text-slate-500">綁定碼</p>
-              <p className="mt-1 text-2xl font-semibold tracking-[0.18em] text-ink">
-                {data?.group.lineJoinCode ?? "------"}
+            <div className="space-y-3 rounded-3xl bg-mist p-4 text-sm leading-6 text-slate-600">
+              <div>
+                <p className="font-semibold text-ink">群組綁定碼</p>
+                <p className="mt-1 text-2xl font-semibold tracking-[0.18em] text-ink">
+                  {data?.group.lineJoinCode ?? "------"}
+                </p>
+              </div>
+              <p>
+                在 LINE 群組可直接輸入：
+                <span className="font-semibold text-ink"> 2{data?.group.lineJoinCode ?? "綁定碼"}</span>
+                或
+                <span className="font-semibold text-ink"> 綁定群組 {data?.group.lineJoinCode ?? "綁定碼"}</span>
               </p>
-              <p className="mt-3 text-sm leading-6 text-slate-500">
-                在 LINE 傳送：
-                <span className="font-semibold text-ink">
-                  {" "}綁定群組 {data?.group.lineJoinCode ?? "綁定碼"}
-                </span>
+              <p>
+                每位成員請私聊 Bot：
+                <span className="font-semibold text-ink"> 10</span>、
+                <span className="font-semibold text-ink"> 設定收款</span>、
+                <span className="font-semibold text-ink"> 更改付款方式</span>
               </p>
-              <p className="mt-2 text-sm leading-6 text-slate-500">
-                之後就能傳「7芋圓300翔濠魚」或「3」快速查結算。
+              <p>
+                若要先確認自己存了什麼，可私聊 Bot 輸入
+                <span className="font-semibold text-ink"> 11</span> 或
+                <span className="font-semibold text-ink"> 查看我的付款方式</span>。
               </p>
             </div>
           </SectionCard>
@@ -643,119 +605,6 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
   );
 }
 
-function PaymentProfileEditor({
-  member,
-  form,
-  saving,
-  onChange,
-  onSave
-}: {
-  member: MemberDto;
-  form: PaymentProfileForm;
-  saving: boolean;
-  onChange: (patch: Partial<PaymentProfileForm>) => void;
-  onSave: () => void;
-}) {
-  return (
-    <div className="rounded-[28px] border border-line bg-mist/80 p-4">
-      <div className="flex flex-col gap-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-base font-semibold text-ink">{member.name}</p>
-            <p className="mt-1 text-sm text-slate-500">
-              設定這個人收到款項時，別人應該怎麼付給他。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={saving}
-            className="rounded-2xl bg-ink px-4 py-2 text-sm font-semibold text-white hover:bg-ink/90 disabled:cursor-not-allowed disabled:bg-slate-300"
-          >
-            {saving ? "儲存中..." : "儲存設定"}
-          </button>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <label className="rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink">
-            <span className="flex items-center gap-3">
-              <input
-                type="checkbox"
-                checked={form.acceptBankTransfer}
-                onChange={(event) =>
-                  onChange({ acceptBankTransfer: event.target.checked })
-                }
-              />
-              接受銀行轉帳
-            </span>
-          </label>
-          <label className="rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink">
-            <span className="flex items-center gap-3">
-              <input
-                type="checkbox"
-                checked={form.acceptLinePay}
-                onChange={(event) => onChange({ acceptLinePay: event.target.checked })}
-              />
-              接受 LINE Pay
-            </span>
-          </label>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <div>
-            <label className="mb-2 block text-sm font-medium text-ink">銀行名稱</label>
-            <input
-              value={form.bankName}
-              onChange={(event) => onChange({ bankName: event.target.value })}
-              placeholder="例如：玉山銀行 808"
-            />
-          </div>
-          <div>
-            <label className="mb-2 block text-sm font-medium text-ink">銀行帳號</label>
-            <input
-              value={form.bankAccount}
-              onChange={(event) => onChange({ bankAccount: event.target.value })}
-              placeholder="例如：xxxxx-xxxxxxx"
-            />
-          </div>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <div>
-            <label className="mb-2 block text-sm font-medium text-ink">LINE Pay 資訊</label>
-            <input
-              value={form.linePayId}
-              onChange={(event) => onChange({ linePayId: event.target.value })}
-              placeholder="例如：linepay.id/b123 或 LINE 名稱"
-            />
-          </div>
-          <label className="rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink md:self-end">
-            <span className="flex items-center gap-3">
-              <input
-                type="checkbox"
-                checked={form.acceptCash}
-                onChange={(event) => onChange({ acceptCash: event.target.checked })}
-              />
-              接受現金
-            </span>
-          </label>
-        </div>
-
-        <div>
-          <label className="mb-2 block text-sm font-medium text-ink">付款備註</label>
-          <textarea
-            value={form.paymentNote}
-            onChange={(event) => onChange({ paymentNote: event.target.value })}
-            placeholder="例如：不收現金，轉帳後請截圖；或只收現金，當面給我。"
-            rows={3}
-            className="min-h-[96px] w-full rounded-2xl border border-line bg-white px-4 py-3 text-sm text-ink outline-none ring-0 placeholder:text-slate-400 focus:border-accent"
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function PaymentMethodsPreview({
   profile
 }: {
@@ -763,9 +612,10 @@ function PaymentMethodsPreview({
 }) {
   if (!profile || !profile.hasAnyMethod) {
     return (
-      <p className="mt-3 text-sm text-slate-500">
-        收款方式尚未設定，建議先到上方成員區塊補上銀行、LINE Pay 或現金偏好。
-      </p>
+      <div className="mt-3 rounded-2xl bg-mist p-3 text-sm leading-6 text-slate-600">
+        <p className="font-medium text-ink">收款方式</p>
+        <p className="mt-1">尚未設定。請對方私聊 Bot 輸入「10」或「設定收款」。</p>
+      </div>
     );
   }
 
@@ -777,11 +627,11 @@ function PaymentMethodsPreview({
           銀行轉帳：
           {[profile.bankName, profile.bankAccount].filter(Boolean).join(" / ")}
         </p>
-      ) : null}
-      {profile.acceptLinePay && profile.linePayId ? (
-        <p>LINE Pay：{profile.linePayId}</p>
-      ) : null}
-      <p>{profile.acceptCash ? "接受現金" : "不接受現金"}</p>
+      ) : (
+        <p>銀行轉帳：不收</p>
+      )}
+      <p>LINE Pay：{profile.acceptLinePay ? "可收" : "不收"}</p>
+      <p>現金：{profile.acceptCash ? "可收" : "不收"}</p>
       {profile.paymentNote ? <p>備註：{profile.paymentNote}</p> : null}
     </div>
   );
@@ -816,7 +666,7 @@ function ExpenseItem({
             </span>
           </div>
           <p className="mt-3 text-sm leading-6 text-slate-600">
-            參與分攤成員：
+            參與分帳成員：
             {expense.participants
               .map(
                 (participant) =>
@@ -835,6 +685,39 @@ function ExpenseItem({
         >
           刪除
         </button>
+      </div>
+    </div>
+  );
+}
+
+function LedgerItem({ ledger }: { ledger: LedgerDto }) {
+  const statusLabel =
+    ledger.status === "active"
+      ? "進行中"
+      : ledger.status === "closed"
+        ? "已結束"
+        : "已封存";
+
+  return (
+    <div className="rounded-[28px] border border-line bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-base font-semibold text-ink">{ledger.name}</p>
+          <p className="mt-1 text-sm text-slate-500">
+            建立於 {new Date(ledger.createdAt).toLocaleDateString("zh-TW")}
+          </p>
+        </div>
+        <span className="rounded-full bg-mist px-3 py-1 text-sm font-medium text-ink">
+          {statusLabel}
+        </span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-sm text-slate-600">
+        <span className="rounded-full bg-mist px-3 py-1">{ledger.expenseCount} 筆支出</span>
+        {ledger.isActive ? (
+          <span className="rounded-full bg-accent/10 px-3 py-1 font-medium text-accent">
+            目前帳本
+          </span>
+        ) : null}
       </div>
     </div>
   );

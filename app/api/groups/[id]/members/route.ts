@@ -37,8 +37,9 @@ export async function POST(request: Request, { params }: Props) {
         member: {
           id: member.id,
           name: member.name,
-          paymentSettingsToken: member.paymentSettingsToken,
-          createdAt: member.createdAt.toISOString()
+          paymentSettingsToken: null,
+          createdAt: member.createdAt.toISOString(),
+          paymentProfile: null
         }
       },
       { status: 201 }
@@ -48,11 +49,11 @@ export async function POST(request: Request, { params }: Props) {
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2002"
     ) {
-      return fail("同一個群組內不能新增重複名稱的成員。");
+      return fail("這個群組裡已經有同名成員了。");
     }
 
     return fail(
-      error instanceof Error ? error.message : "新增成員失敗，請稍後再試。"
+      error instanceof Error ? error.message : "新增成員失敗，請再試一次。"
     );
   }
 }

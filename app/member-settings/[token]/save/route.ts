@@ -39,72 +39,7 @@ function redirectToTokenPage(
 
 export async function POST(request: Request, { params }: Props) {
   const baseUrl = resolveAppBaseUrl(request) ?? new URL(request.url).origin;
-
-  const member = await db.member.findUnique({
-    where: {
-      paymentSettingsToken: params.token
-    }
-  });
-
-  if (!member) {
-    return redirectToTokenPage(params.token, baseUrl, {
-      error: "找不到這個付款設定連結，請重新向 Bot 取得最新連結。"
-    });
-  }
-
-  const formData = await request.formData();
-  const acceptBankTransfer = formData.get("acceptBankTransfer") === "on";
-  const acceptLinePay = formData.get("acceptLinePay") === "on";
-  const acceptCash = formData.get("acceptCash") === "on";
-  const bankName = cleanOptionalString(formData.get("bankName"));
-  const bankAccount = cleanOptionalString(formData.get("bankAccount"));
-  const linePayId = cleanOptionalString(formData.get("linePayId"));
-  const paymentNote = cleanOptionalString(formData.get("paymentNote"));
-
-  if (acceptBankTransfer && !bankAccount) {
-    return redirectToTokenPage(params.token, baseUrl, {
-      error: "你開啟了銀行轉帳，請至少填寫銀行帳號。"
-    });
-  }
-
-  if (acceptLinePay && !linePayId) {
-    return redirectToTokenPage(params.token, baseUrl, {
-      error: "你開啟了 LINE Pay，請填寫 LINE Pay 資訊。"
-    });
-  }
-
-  if (!acceptBankTransfer && !acceptLinePay && !acceptCash) {
-    return redirectToTokenPage(params.token, baseUrl, {
-      error: "至少要保留一種收款方式。"
-    });
-  }
-
-  await db.memberPaymentProfile.upsert({
-    where: {
-      memberId: member.id
-    },
-    update: {
-      acceptBankTransfer,
-      bankName,
-      bankAccount,
-      acceptLinePay,
-      linePayId,
-      acceptCash,
-      paymentNote
-    },
-    create: {
-      memberId: member.id,
-      acceptBankTransfer,
-      bankName,
-      bankAccount,
-      acceptLinePay,
-      linePayId,
-      acceptCash,
-      paymentNote
-    }
-  });
-
   return redirectToTokenPage(params.token, baseUrl, {
-    saved: "1"
+    error: "這個連結已停用，請改成私聊 Bot 輸入「設定收款」。"
   });
 }

@@ -16,6 +16,22 @@ export type GroupListItem = {
   createdAt: string;
   memberCount: number;
   expenseCount: number;
+  ledgerCount: number;
+  activeLedgerName: string | null;
+};
+
+export type LedgerDto = {
+  id: string;
+  groupId: string;
+  name: string;
+  status: "active" | "closed" | "archived";
+  startedAt: string;
+  endedAt: string | null;
+  archivedAt: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  expenseCount: number;
 };
 
 export type MemberDto = {
@@ -76,6 +92,8 @@ export type GroupDetailDto = {
     lineJoinCode: string;
     createdAt: string;
   };
+  activeLedger: LedgerDto | null;
+  ledgers: LedgerDto[];
   members: MemberDto[];
   expenses: ExpenseDto[];
   summary: {
