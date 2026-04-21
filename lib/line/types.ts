@@ -1,12 +1,14 @@
+export type LineEventSource = {
+  type: "user" | "group" | "room";
+  userId?: string;
+  groupId?: string;
+  roomId?: string;
+};
+
 export type LineMessageEvent = {
   type: "message";
   replyToken?: string;
-  source: {
-    type: "user" | "group" | "room";
-    userId?: string;
-    groupId?: string;
-    roomId?: string;
-  };
+  source: LineEventSource;
   message: {
     id: string;
     type: "text";
@@ -19,12 +21,7 @@ export type LineEvent =
   | {
       type: "follow" | "join";
       replyToken?: string;
-      source: {
-        type: "user" | "group" | "room";
-        userId?: string;
-        groupId?: string;
-        roomId?: string;
-      };
+      source: LineEventSource;
     };
 
 export type LineWebhookBody = {
@@ -37,29 +34,21 @@ export type ParsedExpenseCommand = {
   title: string;
   amount: string;
   payerName?: string;
+  payerIsSender?: boolean;
   participantCount?: number;
-  participantNames?: string[];
-  compactMemberBlob?: string;
 };
 
 export type ParsedLineCommand =
-  | { kind: "help" }
   | { kind: "ignored" }
-  | { kind: "create-group"; name: string }
-  | { kind: "create-group-help" }
-  | { kind: "bind"; target: string }
-  | { kind: "bind-help" }
-  | { kind: "add-member"; names: string[] }
-  | { kind: "add-member-help" }
-  | { kind: "delete-member"; name: string }
-  | { kind: "delete-member-help" }
-  | { kind: "list-members" }
-  | { kind: "delete-last-expense" }
-  | { kind: "confirm-delete" }
-  | { kind: "cancel-delete" }
-  | { kind: "settlement" }
-  | { kind: "recent-expenses" }
-  | { kind: "expense-help" }
+  | { kind: "xiaoer-help" }
+  | { kind: "settlement-help" }
+  | { kind: "create-ledger-help" }
+  | { kind: "shortcut"; number: number; payload?: string }
+  | { kind: "join-activity" }
+  | { kind: "leave-activity" }
+  | { kind: "confirm-members" }
+  | { kind: "confirm" }
+  | { kind: "cancel" }
   | { kind: "create-ledger"; name: string }
   | { kind: "switch-ledger"; name: string }
   | { kind: "current-ledger" }
@@ -67,8 +56,13 @@ export type ParsedLineCommand =
   | { kind: "close-ledger" }
   | { kind: "archive-ledger"; name: string }
   | { kind: "list-archived-ledgers" }
-  | { kind: "start-payment-setup" }
-  | { kind: "view-my-payment-settings" }
+  | { kind: "delete-last-expense" }
+  | { kind: "settlement" }
+  | { kind: "mvp" }
+  | { kind: "recent-expenses" }
+  | { kind: "expense-help" }
+  | { kind: "create-group"; name: string }
+  | { kind: "bind"; target: string }
   | { kind: "identify-self"; name: string }
-  | { kind: "cancel-payment-setup" }
+  | { kind: "start-payment-setup" }
   | ParsedExpenseCommand;

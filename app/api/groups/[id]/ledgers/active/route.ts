@@ -9,5 +9,7 @@ type Props = {
 
 export async function GET(_: Request, { params }: Props) {
   const activeLedger = await getActiveLedger(params.id);
-  return ok({ activeLedger: activeLedger ? serializeLedger(activeLedger) : null });
+  return ok({
+    activeLedger: activeLedger ? serializeLedger(activeLedger) : null
+  });
 }

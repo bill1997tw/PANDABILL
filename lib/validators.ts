@@ -1,6 +1,6 @@
 export function assertNonEmptyString(value: unknown, fieldName: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${fieldName}為必填。`);
+    throw new Error(`${fieldName}不能為空白。`);
   }
 
   return value.trim();
@@ -8,7 +8,7 @@ export function assertNonEmptyString(value: unknown, fieldName: string): string 
 
 export function assertStringArray(value: unknown, fieldName: string): string[] {
   if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`${fieldName}至少需要一個項目。`);
+    throw new Error(`${fieldName}至少要有一筆資料。`);
   }
 
   const cleanValues = value
@@ -17,7 +17,7 @@ export function assertStringArray(value: unknown, fieldName: string): string[] {
     .filter(Boolean);
 
   if (cleanValues.length === 0) {
-    throw new Error(`${fieldName}至少需要一個有效項目。`);
+    throw new Error(`${fieldName}至少要有一筆有效資料。`);
   }
 
   return Array.from(new Set(cleanValues));

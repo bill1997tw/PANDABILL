@@ -1,4 +1,8 @@
-import { createLedgerForGroup, listLedgers, serializeLedger } from "@/lib/ledger-service";
+import {
+  createLedgerForGroup,
+  listLedgers,
+  serializeLedger
+} from "@/lib/ledger-service";
 import { fail, ok } from "@/lib/http";
 
 type Props = {
@@ -25,8 +29,6 @@ export async function POST(request: Request, { params }: Props) {
       { status: 201 }
     );
   } catch (error) {
-    return fail(
-      error instanceof Error ? error.message : "建立帳本失敗，請再試一次。"
-    );
+    return fail(error instanceof Error ? error.message : "建立活動失敗。");
   }
 }

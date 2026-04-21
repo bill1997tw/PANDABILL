@@ -27,8 +27,6 @@ export async function POST(request: Request) {
       { status: 201 }
     );
   } catch (error) {
-    return fail(
-      error instanceof Error ? error.message : "建立群組失敗，請再試一次。"
-    );
+    return fail(error instanceof Error ? error.message : "建立群組失敗。");
   }
 }

@@ -14,6 +14,11 @@ enum LedgerStatus {
   archived
 }
 
+enum PendingActionType {
+  delete_recent_expense
+  archive_active_ledger
+}
+
 model Group {
   id           String            @id @default(cuid())
   name         String
@@ -23,6 +28,7 @@ model Group {
   ledgers      Ledger[]
   expenses     Expense[]
   lineBindings LineChatBinding[]
+  pendingActions PendingAction[]
 }
 
 model Ledger {
@@ -30,6 +36,8 @@ model Ledger {
   groupId    String
   name       String
   status     LedgerStatus @default(active)
+  creatorLineUserId String?
+  isCollectingMembers Boolean @default(false)
   startedAt  DateTime     @default(now())
   endedAt    DateTime?
   archivedAt DateTime?
@@ -38,6 +46,7 @@ model Ledger {
   updatedAt  DateTime     @updatedAt
   group      Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
   expenses   Expense[]
+  participants LedgerParticipant[]
 
   @@unique([groupId, name])
   @@index([groupId, isActive])
@@ -48,6 +57,7 @@ model Ledger {
 model Member {
   id                   String                @id @default(cuid())
   name                 String
+  lineUserId           String?
   paymentSettingsToken String?               @unique
   createdAt            DateTime              @default(now())
   groupId              String
@@ -55,8 +65,10 @@ model Member {
   paidExpenses         Expense[]             @relation("ExpensePayer")
   participations       ExpenseParticipant[]
   paymentProfile       MemberPaymentProfile?
+  ledgerParticipants   LedgerParticipant[]
 
   @@unique([groupId, name])
+  @@unique([groupId, lineUserId])
   @@index([groupId, createdAt])
 }
 
@@ -125,6 +137,41 @@ model ExpenseParticipant {
   @@index([memberId, createdAt])
 }
 
+model LedgerParticipant {
+  id          String   @id @default(cuid())
+  ledgerId     String
+  memberId     String
+  lineUserId   String?
+  displayName  String
+  isActive     Boolean  @default(true)
+  joinedAt     DateTime @default(now())
+  leftAt       DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  ledger       Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  member       Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([ledgerId, memberId])
+  @@index([ledgerId, isActive, updatedAt])
+  @@index([lineUserId])
+}
+
+model PendingAction {
+  id                  String            @id @default(cuid())
+  groupId             String
+  chatId              String
+  requesterLineUserId String
+  actionType          PendingActionType
+  targetExpenseId     String?
+  targetLedgerId      String?
+  expiresAt           DateTime
+  createdAt           DateTime          @default(now())
+  group               Group             @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([chatId, actionType, expiresAt])
+  @@index([groupId, expiresAt])
+}
+
 model LineChatBinding {
   id                     String   @id @default(cuid())
   chatId                 String   @unique
@@ -132,6 +179,8 @@ model LineChatBinding {
   lineUserId             String?
   groupId                String
   pendingDeleteExpenseId String?
+  lastMenuMode           String?
+  lastMenuShownAt        DateTime?
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
   group                  Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)

@@ -52,8 +52,6 @@ export async function POST(request: Request, { params }: Props) {
       return fail("這個群組裡已經有同名成員了。");
     }
 
-    return fail(
-      error instanceof Error ? error.message : "新增成員失敗，請再試一次。"
-    );
+    return fail(error instanceof Error ? error.message : "新增成員失敗。");
   }
 }

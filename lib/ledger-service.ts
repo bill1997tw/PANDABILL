@@ -8,6 +8,8 @@ export type LedgerWithCounts = {
   groupId: string;
   name: string;
   status: LedgerStatus;
+  creatorLineUserId: string | null;
+  isCollectingMembers: boolean;
   startedAt: Date;
   endedAt: Date | null;
   archivedAt: Date | null;
@@ -15,6 +17,7 @@ export type LedgerWithCounts = {
   createdAt: Date;
   updatedAt: Date;
   expenseCount: number;
+  participantCount: number;
 };
 
 type LedgerMutationResult = {
@@ -28,6 +31,8 @@ function ledgerSelect() {
     groupId: true,
     name: true,
     status: true,
+    creatorLineUserId: true,
+    isCollectingMembers: true,
     startedAt: true,
     endedAt: true,
     archivedAt: true,
@@ -36,7 +41,12 @@ function ledgerSelect() {
     updatedAt: true,
     _count: {
       select: {
-        expenses: true
+        expenses: true,
+        participants: {
+          where: {
+            isActive: true
+          }
+        }
       }
     }
   } satisfies Prisma.LedgerSelect;
@@ -52,14 +62,63 @@ function mapLedger(
     groupId: ledger.groupId,
     name: ledger.name,
     status: ledger.status,
+    creatorLineUserId: ledger.creatorLineUserId,
+    isCollectingMembers: ledger.isCollectingMembers,
     startedAt: ledger.startedAt,
     endedAt: ledger.endedAt,
     archivedAt: ledger.archivedAt,
     isActive: ledger.isActive,
     createdAt: ledger.createdAt,
     updatedAt: ledger.updatedAt,
-    expenseCount: ledger._count.expenses
+    expenseCount: ledger._count.expenses,
+    participantCount: ledger._count.participants
   };
+}
+
+async function resolveOrCreateMember(input: {
+  tx: Prisma.TransactionClient;
+  groupId: string;
+  lineUserId?: string;
+  displayName: string;
+}) {
+  if (input.lineUserId) {
+    const byLineUserId = await input.tx.member.findFirst({
+      where: {
+        groupId: input.groupId,
+        lineUserId: input.lineUserId
+      }
+    });
+
+    if (byLineUserId) {
+      return byLineUserId;
+    }
+  }
+
+  const byName = await input.tx.member.findFirst({
+    where: {
+      groupId: input.groupId,
+      name: input.displayName
+    }
+  });
+
+  if (byName) {
+    if (!byName.lineUserId && input.lineUserId) {
+      return input.tx.member.update({
+        where: { id: byName.id },
+        data: { lineUserId: input.lineUserId }
+      });
+    }
+
+    return byName;
+  }
+
+  return input.tx.member.create({
+    data: {
+      groupId: input.groupId,
+      name: input.displayName,
+      lineUserId: input.lineUserId
+    }
+  });
 }
 
 export async function getActiveLedger(groupId: string) {
@@ -76,54 +135,78 @@ export async function getActiveLedger(groupId: string) {
 
 export async function listLedgers(groupId: string) {
   const ledgers = await db.ledger.findMany({
-    where: {
-      groupId
-    },
-    orderBy: [
-      {
-        isActive: "desc"
-      },
-      {
-        updatedAt: "desc"
-      }
-    ],
+    where: { groupId },
+    orderBy: [{ isActive: "desc" }, { updatedAt: "desc" }],
     select: ledgerSelect()
   });
 
   return ledgers.map(mapLedger);
 }
 
-export async function createLedgerForGroup(groupId: string, nameInput: unknown) {
-  const name = assertNonEmptyString(nameInput, "帳本名稱");
+export async function getActiveLedgerParticipants(groupId: string) {
+  const ledger = await getActiveLedger(groupId);
+
+  if (!ledger) {
+    return {
+      ledger: null,
+      participants: []
+    };
+  }
+
+  const participants = await db.ledgerParticipant.findMany({
+    where: {
+      ledgerId: ledger.id,
+      isActive: true
+    },
+    include: {
+      member: true
+    },
+    orderBy: {
+      joinedAt: "asc"
+    }
+  });
+
+  return {
+    ledger,
+    participants
+  };
+}
+
+export async function createLedgerForGroup(
+  groupId: string,
+  nameInput: unknown,
+  creator?: {
+    lineUserId?: string;
+    displayName: string;
+  }
+) {
+  const name = assertNonEmptyString(nameInput, "活動名稱");
 
   try {
     return await db.$transaction(async (tx): Promise<LedgerMutationResult> => {
       const group = await tx.group.findUnique({
-        where: {
-          id: groupId
-        }
+        where: { id: groupId }
       });
 
       if (!group) {
         throw new Error("找不到這個群組。");
       }
 
-      const existingActive = await tx.ledger.findFirst({
+      const previousActive = await tx.ledger.findFirst({
         where: {
           groupId,
           isActive: true
         }
       });
 
-      if (existingActive) {
+      if (previousActive) {
         await tx.ledger.update({
-          where: {
-            id: existingActive.id
-          },
+          where: { id: previousActive.id },
           data: {
             isActive: false,
+            isCollectingMembers: false,
             status: LedgerStatus.closed,
-            endedAt: existingActive.endedAt ?? new Date()
+            endedAt: previousActive.endedAt ?? new Date()
           }
         });
       }
@@ -133,15 +216,41 @@ export async function createLedgerForGroup(groupId: string, nameInput: unknown) 
           groupId,
           name,
           status: LedgerStatus.active,
+          creatorLineUserId: creator?.lineUserId ?? null,
+          isCollectingMembers: true,
           isActive: true,
           startedAt: new Date()
         },
         select: ledgerSelect()
       });
 
+      if (creator?.displayName) {
+        const member = await resolveOrCreateMember({
+          tx,
+          groupId,
+          lineUserId: creator.lineUserId,
+          displayName: creator.displayName
+        });
+
+        await tx.ledgerParticipant.create({
+          data: {
+            ledgerId: ledger.id,
+            memberId: member.id,
+            lineUserId: creator.lineUserId ?? null,
+            displayName: creator.displayName,
+            isActive: true
+          }
+        });
+      }
+
+      const refreshed = await tx.ledger.findUniqueOrThrow({
+        where: { id: ledger.id },
+        select: ledgerSelect()
+      });
+
       return {
-        ledger: mapLedger(ledger),
-        previousActiveName: existingActive?.name ?? null
+        ledger: mapLedger(refreshed),
+        previousActiveName: previousActive?.name ?? null
       };
     });
   } catch (error) {
@@ -149,7 +258,7 @@ export async function createLedgerForGroup(groupId: string, nameInput: unknown) 
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2002"
     ) {
-      throw new Error("這個群組裡已經有同名帳本了。");
+      throw new Error("這個群組已經有同名活動帳本，請換一個名稱。");
     }
 
     throw error;
@@ -157,7 +266,7 @@ export async function createLedgerForGroup(groupId: string, nameInput: unknown) 
 }
 
 export async function switchActiveLedger(groupId: string, nameInput: unknown) {
-  const name = assertNonEmptyString(nameInput, "帳本名稱");
+  const name = assertNonEmptyString(nameInput, "活動名稱");
 
   return db.$transaction(async (tx): Promise<LedgerMutationResult> => {
     const target = await tx.ledger.findFirst({
@@ -172,37 +281,34 @@ export async function switchActiveLedger(groupId: string, nameInput: unknown) {
     });
 
     if (!target) {
-      throw new Error("找不到這個帳本。");
+      throw new Error("找不到這個活動帳本。");
     }
 
     if (target.status === LedgerStatus.archived) {
-      throw new Error("這個帳本已封存，不能直接切換成目前帳本。");
+      throw new Error("這個帳本已經封存，若要繼續使用，請重新建立新活動。");
     }
 
-    const existingActive = await tx.ledger.findFirst({
+    const previousActive = await tx.ledger.findFirst({
       where: {
         groupId,
         isActive: true
       }
     });
 
-    if (existingActive && existingActive.id !== target.id) {
+    if (previousActive && previousActive.id !== target.id) {
       await tx.ledger.update({
-        where: {
-          id: existingActive.id
-        },
+        where: { id: previousActive.id },
         data: {
           isActive: false,
+          isCollectingMembers: false,
           status: LedgerStatus.closed,
-          endedAt: existingActive.endedAt ?? new Date()
+          endedAt: previousActive.endedAt ?? new Date()
         }
       });
     }
 
-    const updatedTarget = await tx.ledger.update({
-      where: {
-        id: target.id
-      },
+    const updated = await tx.ledger.update({
+      where: { id: target.id },
       data: {
         isActive: true,
         status: LedgerStatus.active,
@@ -213,16 +319,183 @@ export async function switchActiveLedger(groupId: string, nameInput: unknown) {
     });
 
     return {
-      ledger: mapLedger(updatedTarget),
+      ledger: mapLedger(updated),
       previousActiveName:
-        existingActive && existingActive.id !== target.id ? existingActive.name : null
+        previousActive && previousActive.id !== target.id ? previousActive.name : null
     };
+  });
+}
+
+export async function joinCollectingLedger(input: {
+  groupId: string;
+  lineUserId?: string;
+  displayName: string;
+}) {
+  return db.$transaction(async (tx) => {
+    const ledger = await tx.ledger.findFirst({
+      where: {
+        groupId: input.groupId,
+        isActive: true
+      }
+    });
+
+    if (!ledger) {
+      return { status: "no-ledger" as const, ledgerName: null };
+    }
+
+    if (!ledger.isCollectingMembers) {
+      return { status: "not-collecting" as const, ledgerName: ledger.name };
+    }
+
+    const member = await resolveOrCreateMember({
+      tx,
+      groupId: input.groupId,
+      lineUserId: input.lineUserId,
+      displayName: input.displayName
+    });
+
+    const existing = await tx.ledgerParticipant.findFirst({
+      where: {
+        ledgerId: ledger.id,
+        memberId: member.id
+      }
+    });
+
+    if (existing?.isActive) {
+      return { status: "already-joined" as const, ledgerName: ledger.name };
+    }
+
+    if (existing) {
+      await tx.ledgerParticipant.update({
+        where: { id: existing.id },
+        data: {
+          isActive: true,
+          lineUserId: input.lineUserId ?? existing.lineUserId,
+          displayName: input.displayName,
+          leftAt: null
+        }
+      });
+    } else {
+      await tx.ledgerParticipant.create({
+        data: {
+          ledgerId: ledger.id,
+          memberId: member.id,
+          lineUserId: input.lineUserId ?? null,
+          displayName: input.displayName
+        }
+      });
+    }
+
+    return { status: "joined" as const, ledgerName: ledger.name };
+  });
+}
+
+export async function leaveCollectingLedger(input: {
+  groupId: string;
+  lineUserId?: string;
+  displayName: string;
+}) {
+  return db.$transaction(async (tx) => {
+    const ledger = await tx.ledger.findFirst({
+      where: {
+        groupId: input.groupId,
+        isActive: true
+      }
+    });
+
+    if (!ledger) {
+      return { status: "no-ledger" as const, ledgerName: null };
+    }
+
+    if (!ledger.isCollectingMembers) {
+      return { status: "not-collecting" as const, ledgerName: ledger.name };
+    }
+
+    const participant = await tx.ledgerParticipant.findFirst({
+      where: {
+        ledgerId: ledger.id,
+        isActive: true,
+        OR: [
+          input.lineUserId
+            ? {
+                lineUserId: input.lineUserId
+              }
+            : undefined,
+          {
+            displayName: input.displayName
+          }
+        ].filter(Boolean) as Prisma.LedgerParticipantWhereInput[]
+      }
+    });
+
+    if (!participant) {
+      return { status: "not-joined" as const, ledgerName: ledger.name };
+    }
+
+    await tx.ledgerParticipant.update({
+      where: { id: participant.id },
+      data: {
+        isActive: false,
+        leftAt: new Date()
+      }
+    });
+
+    return { status: "left" as const, ledgerName: ledger.name };
+  });
+}
+
+export async function confirmCollectingLedger(groupId: string) {
+  return db.$transaction(async (tx) => {
+    const ledger = await tx.ledger.findFirst({
+      where: {
+        groupId,
+        isActive: true
+      }
+    });
+
+    if (!ledger) {
+      return { status: "no-ledger" as const, ledger: null, participants: [] };
+    }
+
+    const participants = await tx.ledgerParticipant.findMany({
+      where: {
+        ledgerId: ledger.id,
+        isActive: true
+      },
+      include: {
+        member: true
+      },
+      orderBy: {
+        joinedAt: "asc"
+      }
+    });
+
+    if (!ledger.isCollectingMembers) {
+      return {
+        status: "already-confirmed" as const,
+        ledger,
+        participants
+      };
+    }
+
+    if (participants.length === 0) {
+      return { status: "no-participants" as const, ledger, participants: [] };
+    }
+
+    const updated = await tx.ledger.update({
+      where: { id: ledger.id },
+      data: {
+        isCollectingMembers: false
+      }
+    });
+
+    return { status: "confirmed" as const, ledger: updated, participants };
   });
 }
 
 export async function closeActiveLedger(groupId: string) {
   return db.$transaction(async (tx) => {
-    const activeLedger = await tx.ledger.findFirst({
+    const ledger = await tx.ledger.findFirst({
       where: {
         groupId,
         isActive: true
@@ -230,28 +503,27 @@ export async function closeActiveLedger(groupId: string) {
       select: ledgerSelect()
     });
 
-    if (!activeLedger) {
+    if (!ledger) {
       return null;
     }
 
-    const closedLedger = await tx.ledger.update({
-      where: {
-        id: activeLedger.id
-      },
+    const updated = await tx.ledger.update({
+      where: { id: ledger.id },
       data: {
         isActive: false,
+        isCollectingMembers: false,
         status: LedgerStatus.closed,
-        endedAt: activeLedger.endedAt ?? new Date()
+        endedAt: ledger.endedAt ?? new Date()
       },
       select: ledgerSelect()
     });
 
-    return mapLedger(closedLedger);
+    return mapLedger(updated);
   });
 }
 
 export async function archiveLedger(groupId: string, nameInput: unknown) {
-  const name = assertNonEmptyString(nameInput, "帳本名稱");
+  const name = assertNonEmptyString(nameInput, "活動名稱");
 
   const ledger = await db.ledger.findFirst({
     where: {
@@ -265,15 +537,14 @@ export async function archiveLedger(groupId: string, nameInput: unknown) {
   });
 
   if (!ledger) {
-    throw new Error("找不到這個帳本。");
+    throw new Error("找不到這個活動帳本。");
   }
 
-  const archived = await db.ledger.update({
-    where: {
-      id: ledger.id
-    },
+  const updated = await db.ledger.update({
+    where: { id: ledger.id },
     data: {
       isActive: false,
+      isCollectingMembers: false,
       status: LedgerStatus.archived,
       endedAt: ledger.endedAt ?? new Date(),
       archivedAt: ledger.archivedAt ?? new Date()
@@ -281,24 +552,17 @@ export async function archiveLedger(groupId: string, nameInput: unknown) {
     select: ledgerSelect()
   });
 
-  return mapLedger(archived);
+  return mapLedger(updated);
 }
 
-export async function getLedgerByName(groupId: string, nameInput: unknown) {
-  const name = assertNonEmptyString(nameInput, "帳本名稱");
+export async function archiveActiveLedger(groupId: string) {
+  const activeLedger = await getActiveLedger(groupId);
 
-  const ledger = await db.ledger.findFirst({
-    where: {
-      groupId,
-      name: {
-        equals: name,
-        mode: "insensitive"
-      }
-    },
-    select: ledgerSelect()
-  });
+  if (!activeLedger) {
+    return null;
+  }
 
-  return ledger ? mapLedger(ledger) : null;
+  return archiveLedger(groupId, activeLedger.name);
 }
 
 export function serializeLedger(ledger: LedgerWithCounts) {
@@ -307,12 +571,15 @@ export function serializeLedger(ledger: LedgerWithCounts) {
     groupId: ledger.groupId,
     name: ledger.name,
     status: ledger.status,
+    creatorLineUserId: ledger.creatorLineUserId,
+    isCollectingMembers: ledger.isCollectingMembers,
     startedAt: ledger.startedAt.toISOString(),
     endedAt: ledger.endedAt?.toISOString() ?? null,
     archivedAt: ledger.archivedAt?.toISOString() ?? null,
     isActive: ledger.isActive,
     createdAt: ledger.createdAt.toISOString(),
     updatedAt: ledger.updatedAt.toISOString(),
-    expenseCount: ledger.expenseCount
+    expenseCount: ledger.expenseCount,
+    participantCount: ledger.participantCount
   };
 }

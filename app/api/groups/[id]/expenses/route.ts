@@ -21,16 +21,6 @@ export async function POST(request: Request, { params }: Props) {
 
     return ok(result, { status: 201 });
   } catch (error) {
-    if (
-      error instanceof Error &&
-      (error.message === "找不到這個群組。" ||
-        error.message === "目前沒有進行中的帳本，請先輸入：建立活動 活動名稱")
-    ) {
-      return fail(error.message, 404);
-    }
-
-    return fail(
-      error instanceof Error ? error.message : "新增支出失敗，請再試一次。"
-    );
+    return fail(error instanceof Error ? error.message : "新增支出失敗。");
   }
 }

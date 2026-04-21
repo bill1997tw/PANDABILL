@@ -4,7 +4,7 @@ export function parseAmountToCents(input: string | number): number {
   const raw = String(input).trim();
 
   if (!DECIMAL_REGEX.test(raw)) {
-    throw new Error("金額格式不正確，請輸入最多兩位小數的正數。");
+    throw new Error("金額格式不正確，請輸入像 2000 或 128.50 這樣的數字。");
   }
 
   const [whole, fraction = ""] = raw.split(".");

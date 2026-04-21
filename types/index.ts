@@ -25,6 +25,8 @@ export type LedgerDto = {
   groupId: string;
   name: string;
   status: "active" | "closed" | "archived";
+  creatorLineUserId: string | null;
+  isCollectingMembers: boolean;
   startedAt: string;
   endedAt: string | null;
   archivedAt: string | null;
@@ -32,6 +34,7 @@ export type LedgerDto = {
   createdAt: string;
   updatedAt: string;
   expenseCount: number;
+  participantCount: number;
 };
 
 export type MemberDto = {
