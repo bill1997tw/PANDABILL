@@ -72,27 +72,25 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "list-ledgers" };
   }
 
-  if (["確認成員", "2", "2確認成員", "2 確認成員"].includes(normalized)) {
+  if (["確認成員", "2確認成員", "2 確認成員"].includes(normalized)) {
     return { kind: "confirm-members" };
   }
 
   if (
     normalized === "查看支出" ||
     normalized === "最近支出" ||
-    normalized === "5" ||
     normalized === "5查看支出" ||
     normalized === "5 查看支出"
   ) {
     return { kind: "recent-expenses" };
   }
 
-  if (normalized === "支出" || normalized === "4" || normalized === "4支出" || normalized === "4 支出") {
+  if (normalized === "支出" || normalized === "4支出" || normalized === "4 支出") {
     return { kind: "expense-help" };
   }
 
   if (
     normalized === "刪除最近一筆支出" ||
-    normalized === "6" ||
     normalized === "6刪除最近一筆支出" ||
     normalized === "6 刪除最近一筆支出"
   ) {
