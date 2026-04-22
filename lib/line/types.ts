@@ -40,6 +40,7 @@ export type ParsedExpenseCommand = {
 
 export type ParsedLineCommand =
   | { kind: "ignored" }
+  | { kind: "menu-context-required" }
   | { kind: "xiaoer-help" }
   | { kind: "settlement-help" }
   | { kind: "create-ledger-help" }

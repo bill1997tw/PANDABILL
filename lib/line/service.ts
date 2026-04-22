@@ -10,8 +10,7 @@ import {
   getExpenseGuideText,
   getPaymentSetupGuideText,
   getSettlementMenuText,
-  getXiaoerMenuText,
-  type MenuMode
+  getXiaoerMenuText
 } from "@/lib/commands/help";
 import { formatPaymentSummary } from "@/lib/commands/payment";
 import {
@@ -19,6 +18,12 @@ import {
   createPendingAction,
   getPendingAction
 } from "@/lib/commands/pending";
+import {
+  getActiveMenuContext,
+  getMenuContextExpiredPrompt,
+  rememberMenuContext,
+  resolveMenuModeFromContext
+} from "@/lib/commands/menu-context";
 import { getMvpText, getSettlementSummaryText } from "@/lib/commands/settlement";
 import { formatCents } from "@/lib/currency";
 import { db } from "@/lib/db";
@@ -55,8 +60,6 @@ import {
 import { parseLineCommand } from "@/lib/line/parser";
 import { getLineDisplayName } from "@/lib/line/profile";
 import type { LineEvent, LineMessageEvent, ParsedLineCommand } from "@/lib/line/types";
-
-const MENU_TTL_MINUTES = 10;
 
 function getChatContext(source: LineEvent["source"]) {
   if (source.type === "group") {
@@ -99,31 +102,6 @@ async function getBoundGroup(chatId: string) {
       }
     }
   });
-}
-
-async function rememberMenu(chatId: string, mode: MenuMode) {
-  await db.lineChatBinding.updateMany({
-    where: { chatId },
-    data: {
-      lastMenuMode: mode,
-      lastMenuShownAt: new Date()
-    }
-  });
-}
-
-function resolveMenuMode(binding: Awaited<ReturnType<typeof getBoundGroup>>) {
-  if (!binding?.lastMenuMode || !binding.lastMenuShownAt) {
-    return null;
-  }
-
-  const age = Date.now() - binding.lastMenuShownAt.getTime();
-  if (age > MENU_TTL_MINUTES * 60 * 1000) {
-    return null;
-  }
-
-  return binding.lastMenuMode === "xiaoer" || binding.lastMenuMode === "settlement"
-    ? binding.lastMenuMode
-    : null;
 }
 
 function getGroupOnlyMessage() {
@@ -438,43 +416,17 @@ async function resolveShortcutCommand(
   number: number,
   payload?: string
 ): Promise<ParsedLineCommand> {
-  const { chatId, chatType } = getChatContext(event.source);
-  const binding = await getBoundGroup(chatId);
-  const menuMode = resolveMenuMode(binding);
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
+  const context = await getActiveMenuContext(chatId, lineUserId);
+  const menuMode = resolveMenuModeFromContext(context);
   const trimmedPayload = payload?.trim();
 
   if (!menuMode) {
-    if (number === 1) {
-      return trimmedPayload
-        ? { kind: "create-ledger", name: trimmedPayload }
-        : { kind: "create-ledger-help" };
-    }
-
-    if (number === 2) {
-      return { kind: "confirm-members" };
-    }
-
-    if (number === 3) {
-      return { kind: "start-payment-setup" };
-    }
-
-    if (number === 4) {
-      return { kind: "expense-help" };
-    }
-
-    if (number === 5) {
-      return { kind: "recent-expenses" };
-    }
-
-    if (number === 6) {
-      return { kind: "delete-last-expense" };
-    }
-
     if (chatType === "user" && number === 3) {
       return { kind: "start-payment-setup" };
     }
 
-    return { kind: "ignored" };
+    return { kind: "menu-context-required" };
   }
 
   if (menuMode === "xiaoer") {
@@ -544,7 +496,12 @@ async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) 
     displayName
   });
 
-  await rememberMenu(chatId, "xiaoer");
+  await rememberMenuContext({
+    chatId,
+    lineUserId,
+    groupId: binding.group.id,
+    mode: "xiaoer"
+  });
 
   const activeParticipants = await getActiveLedgerParticipants(binding.group.id);
   const memberNames = activeParticipants.participants.map(
@@ -1055,15 +1012,30 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
     case "ignored":
       return null;
 
+    case "menu-context-required":
+      return getMenuContextExpiredPrompt();
+
     case "xiaoer-help":
-      if (chatType !== "user") {
-        await rememberMenu(chatId, "xiaoer");
+      if (lineUserId) {
+        const binding = chatType !== "user" ? await getBoundGroup(chatId) : null;
+        await rememberMenuContext({
+          chatId,
+          lineUserId,
+          groupId: binding?.group.id ?? null,
+          mode: "xiaoer"
+        });
       }
       return getXiaoerMenuText();
 
     case "settlement-help":
-      if (chatType !== "user") {
-        await rememberMenu(chatId, "settlement");
+      if (lineUserId) {
+        const binding = chatType !== "user" ? await getBoundGroup(chatId) : null;
+        await rememberMenuContext({
+          chatId,
+          lineUserId,
+          groupId: binding?.group.id ?? null,
+          mode: "settlement"
+        });
       }
       return getSettlementMenuText();
 
