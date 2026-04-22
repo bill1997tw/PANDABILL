@@ -72,6 +72,6 @@ export function getMvpText(input: {
     `目前活動：${input.activityName}`,
     `👑 本次代墊MVP：${input.memberName}`,
     `共代墊 ${input.advanceCount} 次，總金額 ${formatCents(input.totalPaidCents)} 元`,
-    "太罩了大人，大家一起歡呼～大笑表情"
+    "太罩了大人，大家一起歡呼～🥹"
   ].join("\n");
 }
