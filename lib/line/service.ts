@@ -12,6 +12,7 @@ import {
   getSettlementMenuText,
   getXiaoerMenuText
 } from "@/lib/commands/help";
+import { getCollectingMemberUpdateText } from "@/lib/commands/participant-roster";
 import { formatPaymentSummary } from "@/lib/commands/payment";
 import {
   clearPendingAction,
@@ -567,6 +568,66 @@ async function handleJoinOrLeave(
   return action === "join" ? `${displayName}已加入` : `${displayName}已退出`;
 }
 
+async function handleJoinOrLeaveWithRoster(
+  event: LineMessageEvent,
+  action: "join" | "leave"
+) {
+  const { chatId, lineUserId, chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getBoundGroup(chatId);
+  if (!binding) {
+    return getBindGroupMessage();
+  }
+
+  const displayName = await resolveActorDisplayName(event);
+  const result =
+    action === "join"
+      ? await joinCollectingLedger({
+          groupId: binding.group.id,
+          lineUserId,
+          displayName
+        })
+      : await leaveCollectingLedger({
+          groupId: binding.group.id,
+          lineUserId,
+          displayName
+        });
+
+  if (result.status === "no-ledger") {
+    return getNoActiveLedgerText();
+  }
+
+  if (result.status === "not-collecting") {
+    return "這個活動的成員已經確認完成，現在可以直接記帳。";
+  }
+
+  if (result.status === "already-joined") {
+    return getCollectingMemberUpdateText({
+      type: "already-joined",
+      actorName: displayName,
+      memberNames: result.participants.map((participant) => participant.displayName)
+    });
+  }
+
+  if (result.status === "not-joined") {
+    return getCollectingMemberUpdateText({
+      type: "not-joined",
+      actorName: displayName,
+      memberNames: result.participants.map((participant) => participant.displayName)
+    });
+  }
+
+  return getCollectingMemberUpdateText({
+    type: action === "join" ? "joined" : "left",
+    actorName: displayName,
+    memberNames: result.participants.map((participant) => participant.displayName)
+  });
+}
+
 async function handleConfirmMembers(event: LineMessageEvent) {
   const { chatId, chatType } = getChatContext(event.source);
 
@@ -1040,10 +1101,10 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
       return getSettlementMenuText();
 
     case "join-activity":
-      return handleJoinOrLeave(event, "join");
+      return handleJoinOrLeaveWithRoster(event, "join");
 
     case "leave-activity":
-      return handleJoinOrLeave(event, "leave");
+      return handleJoinOrLeaveWithRoster(event, "leave");
 
     case "confirm-members":
       return handleConfirmMembers(event);

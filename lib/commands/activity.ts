@@ -1,3 +1,5 @@
+import { formatCurrentMembersLine } from "@/lib/commands/participant-roster";
+
 type ActivityListItem = {
   name: string;
   isActive: boolean;
@@ -7,9 +9,13 @@ type ActivityListItem = {
 export function getCollectingMembersPrompt(activityName: string, memberNames: string[]) {
   return [
     `已建立活動：${activityName}`,
-    `目前已加入成員：${memberNames.join("、")}`,
-    "其他人只要輸入 + / +1 / 我要去 / 參加 就能加入",
-    "輸入 - / -1 / 不去 / 退出 就能退出"
+    formatCurrentMembersLine(memberNames),
+    "",
+    "其他人可輸入：",
+    "+ / +1 加入",
+    "- / -1 退出",
+    "",
+    "全部確認後請輸入：確認成員"
   ].join("\n");
 }
 

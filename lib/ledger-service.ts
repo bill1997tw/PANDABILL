@@ -20,6 +20,12 @@ export type LedgerWithCounts = {
   participantCount: number;
 };
 
+type ActiveLedgerParticipantWithMember = Prisma.LedgerParticipantGetPayload<{
+  include: {
+    member: true;
+  };
+}>;
+
 type LedgerMutationResult = {
   ledger: LedgerWithCounts;
   previousActiveName: string | null;
@@ -73,6 +79,42 @@ function mapLedger(
     expenseCount: ledger._count.expenses,
     participantCount: ledger._count.participants
   };
+}
+
+function sortActiveParticipants(
+  participants: ActiveLedgerParticipantWithMember[],
+  creatorLineUserId: string | null
+) {
+  return [...participants].sort((left, right) => {
+    const leftIsCreator =
+      Boolean(creatorLineUserId) && left.lineUserId === creatorLineUserId;
+    const rightIsCreator =
+      Boolean(creatorLineUserId) && right.lineUserId === creatorLineUserId;
+
+    if (leftIsCreator !== rightIsCreator) {
+      return leftIsCreator ? -1 : 1;
+    }
+
+    return left.joinedAt.getTime() - right.joinedAt.getTime();
+  });
+}
+
+async function getSortedActiveParticipants(
+  tx: Prisma.TransactionClient | typeof db,
+  ledgerId: string,
+  creatorLineUserId: string | null
+) {
+  const participants = await tx.ledgerParticipant.findMany({
+    where: {
+      ledgerId,
+      isActive: true
+    },
+    include: {
+      member: true
+    }
+  });
+
+  return sortActiveParticipants(participants, creatorLineUserId);
 }
 
 async function resolveOrCreateMember(input: {
@@ -153,18 +195,11 @@ export async function getActiveLedgerParticipants(groupId: string) {
     };
   }
 
-  const participants = await db.ledgerParticipant.findMany({
-    where: {
-      ledgerId: ledger.id,
-      isActive: true
-    },
-    include: {
-      member: true
-    },
-    orderBy: {
-      joinedAt: "asc"
-    }
-  });
+  const participants = await getSortedActiveParticipants(
+    db,
+    ledger.id,
+    ledger.creatorLineUserId
+  );
 
   return {
     ledger,
@@ -340,11 +375,19 @@ export async function joinCollectingLedger(input: {
     });
 
     if (!ledger) {
-      return { status: "no-ledger" as const, ledgerName: null };
+      return { status: "no-ledger" as const, ledgerName: null, participants: [] };
     }
 
     if (!ledger.isCollectingMembers) {
-      return { status: "not-collecting" as const, ledgerName: ledger.name };
+      return {
+        status: "not-collecting" as const,
+        ledgerName: ledger.name,
+        participants: await getSortedActiveParticipants(
+          tx,
+          ledger.id,
+          ledger.creatorLineUserId
+        )
+      };
     }
 
     const member = await resolveOrCreateMember({
@@ -362,7 +405,15 @@ export async function joinCollectingLedger(input: {
     });
 
     if (existing?.isActive) {
-      return { status: "already-joined" as const, ledgerName: ledger.name };
+      return {
+        status: "already-joined" as const,
+        ledgerName: ledger.name,
+        participants: await getSortedActiveParticipants(
+          tx,
+          ledger.id,
+          ledger.creatorLineUserId
+        )
+      };
     }
 
     if (existing) {
@@ -386,7 +437,15 @@ export async function joinCollectingLedger(input: {
       });
     }
 
-    return { status: "joined" as const, ledgerName: ledger.name };
+    return {
+      status: "joined" as const,
+      ledgerName: ledger.name,
+      participants: await getSortedActiveParticipants(
+        tx,
+        ledger.id,
+        ledger.creatorLineUserId
+      )
+    };
   });
 }
 
@@ -404,11 +463,19 @@ export async function leaveCollectingLedger(input: {
     });
 
     if (!ledger) {
-      return { status: "no-ledger" as const, ledgerName: null };
+      return { status: "no-ledger" as const, ledgerName: null, participants: [] };
     }
 
     if (!ledger.isCollectingMembers) {
-      return { status: "not-collecting" as const, ledgerName: ledger.name };
+      return {
+        status: "not-collecting" as const,
+        ledgerName: ledger.name,
+        participants: await getSortedActiveParticipants(
+          tx,
+          ledger.id,
+          ledger.creatorLineUserId
+        )
+      };
     }
 
     const participant = await tx.ledgerParticipant.findFirst({
@@ -429,7 +496,15 @@ export async function leaveCollectingLedger(input: {
     });
 
     if (!participant) {
-      return { status: "not-joined" as const, ledgerName: ledger.name };
+      return {
+        status: "not-joined" as const,
+        ledgerName: ledger.name,
+        participants: await getSortedActiveParticipants(
+          tx,
+          ledger.id,
+          ledger.creatorLineUserId
+        )
+      };
     }
 
     await tx.ledgerParticipant.update({
@@ -440,7 +515,15 @@ export async function leaveCollectingLedger(input: {
       }
     });
 
-    return { status: "left" as const, ledgerName: ledger.name };
+    return {
+      status: "left" as const,
+      ledgerName: ledger.name,
+      participants: await getSortedActiveParticipants(
+        tx,
+        ledger.id,
+        ledger.creatorLineUserId
+      )
+    };
   });
 }
 
@@ -457,18 +540,11 @@ export async function confirmCollectingLedger(groupId: string) {
       return { status: "no-ledger" as const, ledger: null, participants: [] };
     }
 
-    const participants = await tx.ledgerParticipant.findMany({
-      where: {
-        ledgerId: ledger.id,
-        isActive: true
-      },
-      include: {
-        member: true
-      },
-      orderBy: {
-        joinedAt: "asc"
-      }
-    });
+    const participants = await getSortedActiveParticipants(
+      tx,
+      ledger.id,
+      ledger.creatorLineUserId
+    );
 
     if (!ledger.isCollectingMembers) {
       return {
