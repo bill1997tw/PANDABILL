@@ -4,14 +4,36 @@ import { db } from "@/lib/db";
 
 const PENDING_TTL_MINUTES = 5;
 
-function getExpiresAt() {
-  return new Date(Date.now() + PENDING_TTL_MINUTES * 60 * 1000);
+type PendingLookupInput = {
+  chatId: string;
+  requesterLineUserId?: string;
+  actionType?: PendingActionType;
+};
+
+function getExpiresAt(minutes = PENDING_TTL_MINUTES) {
+  return new Date(Date.now() + minutes * 60 * 1000);
 }
 
-export async function clearExpiredPendingActions(chatId: string) {
+function buildPendingWhere(input: PendingLookupInput) {
+  return {
+    chatId: input.chatId,
+    ...(input.requesterLineUserId
+      ? {
+          requesterLineUserId: input.requesterLineUserId
+        }
+      : {}),
+    ...(input.actionType
+      ? {
+          actionType: input.actionType
+        }
+      : {})
+  };
+}
+
+export async function clearExpiredPendingActions(input: PendingLookupInput) {
   await db.pendingAction.deleteMany({
     where: {
-      chatId,
+      ...buildPendingWhere(input),
       expiresAt: {
         lt: new Date()
       }
@@ -26,10 +48,12 @@ export async function createPendingAction(input: {
   actionType: PendingActionType;
   targetExpenseId?: string | null;
   targetLedgerId?: string | null;
+  ttlMinutes?: number;
 }) {
   await db.pendingAction.deleteMany({
     where: {
-      chatId: input.chatId
+      chatId: input.chatId,
+      requesterLineUserId: input.requesterLineUserId
     }
   });
 
@@ -41,28 +65,59 @@ export async function createPendingAction(input: {
       actionType: input.actionType,
       targetExpenseId: input.targetExpenseId ?? null,
       targetLedgerId: input.targetLedgerId ?? null,
-      expiresAt: getExpiresAt()
+      expiresAt: getExpiresAt(input.ttlMinutes)
     }
   });
 }
 
-export async function getPendingAction(chatId: string) {
-  await clearExpiredPendingActions(chatId);
+export async function getPendingAction(input: PendingLookupInput) {
+  await clearExpiredPendingActions(input);
 
   return db.pendingAction.findFirst({
-    where: {
-      chatId
-    },
+    where: buildPendingWhere(input),
     orderBy: {
       createdAt: "desc"
     }
   });
 }
 
-export async function clearPendingAction(chatId: string) {
-  await db.pendingAction.deleteMany({
-    where: {
-      chatId
+export async function getPendingActionState(input: PendingLookupInput) {
+  const pending = await db.pendingAction.findFirst({
+    where: buildPendingWhere(input),
+    orderBy: {
+      createdAt: "desc"
     }
+  });
+
+  if (!pending) {
+    return {
+      pending: null,
+      expired: false
+    };
+  }
+
+  if (pending.expiresAt < new Date()) {
+    await db.pendingAction.delete({
+      where: {
+        id: pending.id
+      }
+    });
+
+    return {
+      pending: null,
+      expired: true,
+      expiredActionType: pending.actionType
+    };
+  }
+
+  return {
+    pending,
+    expired: false
+  };
+}
+
+export async function clearPendingAction(input: PendingLookupInput) {
+  await db.pendingAction.deleteMany({
+    where: buildPendingWhere(input)
   });
 }

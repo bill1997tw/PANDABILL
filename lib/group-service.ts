@@ -83,6 +83,28 @@ async function getGroupMemberPaymentMap(memberNames: string[]) {
   return paymentMap;
 }
 
+function hasCompletedPaymentMethod(
+  profile:
+    | {
+        acceptBankTransfer: boolean;
+        bankAccount: string | null;
+        acceptLinePay: boolean;
+        acceptCash: boolean;
+      }
+    | null
+    | undefined
+) {
+  if (!profile) {
+    return false;
+  }
+
+  return (
+    (profile.acceptBankTransfer && Boolean(profile.bankAccount)) ||
+    profile.acceptLinePay ||
+    profile.acceptCash
+  );
+}
+
 async function getGroupWithMembers(groupId: string) {
   return db.group.findUnique({
     where: { id: groupId },
@@ -584,4 +606,68 @@ export async function getConfirmedMemberIdsForActiveLedger(groupId: string) {
     memberIds: participants.map((participant) => participant.memberId),
     memberNames: participants.map((participant) => participant.displayName)
   };
+}
+
+export async function getMembersMissingPaymentMethod(ledgerId: string) {
+  const participants = await db.ledgerParticipant.findMany({
+    where: {
+      ledgerId,
+      isActive: true
+    },
+    include: {
+      member: true
+    },
+    orderBy: {
+      joinedAt: "asc"
+    }
+  });
+
+  if (participants.length === 0) {
+    return [];
+  }
+
+  const lineUserIds = participants
+    .map((participant) => participant.lineUserId ?? participant.member.lineUserId)
+    .filter((value): value is string => Boolean(value));
+
+  const memberNames = participants.map((participant) => participant.member.name);
+
+  const [profilesByLineUserId, profilesByMemberName] = await Promise.all([
+    lineUserIds.length > 0
+      ? db.lineUserProfile.findMany({
+          where: {
+            lineUserId: {
+              in: lineUserIds
+            }
+          }
+        })
+      : Promise.resolve([]),
+    db.lineUserProfile.findMany({
+      where: {
+        memberName: {
+          in: memberNames
+        }
+      }
+    })
+  ]);
+
+  const profileByLineUserId = new Map(
+    profilesByLineUserId.map((profile) => [profile.lineUserId, profile])
+  );
+  const profileByMemberName = new Map(
+    profilesByMemberName
+      .filter((profile) => profile.memberName)
+      .map((profile) => [profile.memberName as string, profile])
+  );
+
+  return participants
+    .filter((participant) => {
+      const profile =
+        profileByLineUserId.get(participant.lineUserId ?? participant.member.lineUserId ?? "") ??
+        profileByMemberName.get(participant.member.name) ??
+        null;
+
+      return !hasCompletedPaymentMethod(profile);
+    })
+    .map((participant) => participant.displayName);
 }

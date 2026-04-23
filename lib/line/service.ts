@@ -17,7 +17,8 @@ import { formatPaymentSummary } from "@/lib/commands/payment";
 import {
   clearPendingAction,
   createPendingAction,
-  getPendingAction
+  getPendingAction,
+  getPendingActionState
 } from "@/lib/commands/pending";
 import {
   getActiveMenuContext,
@@ -35,6 +36,7 @@ import {
   getActiveLedgerExpenseMvp,
   getArchivedLedgerSnapshots,
   getConfirmedMemberIdsForActiveLedger,
+  getMembersMissingPaymentMethod,
   getRecentExpenses,
   getSettlementSnapshot
 } from "@/lib/group-service";
@@ -72,6 +74,9 @@ import {
 } from "@/lib/line/quick-reply";
 import type { LineTextReplyPayload } from "@/lib/line/client";
 import type { LineEvent, LineMessageEvent, ParsedLineCommand } from "@/lib/line/types";
+
+const AWAITING_ACTIVITY_NAME_ACTION =
+  "awaiting_activity_name" as PendingActionType;
 
 function getChatContext(source: LineEvent["source"]) {
   if (source.type === "group") {
@@ -135,6 +140,14 @@ function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextRepl
   };
 }
 
+function getAwaitingActivityNamePrompt() {
+  return "請輸入這次活動名稱，例如：宜蘭三天兩夜";
+}
+
+function getAwaitingActivityNameExpiredPrompt() {
+  return "建立活動已逾時，請重新輸入「建立活動」";
+}
+
 function parseBooleanChoice(text: string) {
   const normalized = text.trim();
 
@@ -183,6 +196,26 @@ async function resolveActorDisplayName(event: LineMessageEvent) {
   }
 
   return "未知成員";
+}
+
+async function startAwaitingActivityName(input: {
+  groupId: string;
+  chatId: string;
+  lineUserId?: string;
+}) {
+  if (!input.lineUserId) {
+    return "目前抓不到你的 LINE 身分，請稍後再試。";
+  }
+
+  await createPendingAction({
+    groupId: input.groupId,
+    chatId: input.chatId,
+    requesterLineUserId: input.lineUserId,
+    actionType: AWAITING_ACTIVITY_NAME_ACTION,
+    ttlMinutes: 3
+  });
+
+  return getAwaitingActivityNamePrompt();
 }
 
 async function bindGroup(
@@ -513,6 +546,14 @@ async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) 
     return getBindGroupMessage();
   }
 
+  if (lineUserId) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: AWAITING_ACTIVITY_NAME_ACTION
+    });
+  }
+
   const displayName = await resolveActorDisplayName(event);
   const result = await createLedgerForGroup(binding.group.id, name, {
     lineUserId,
@@ -546,6 +587,45 @@ async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) 
     getCollectingMembersPrompt(result.ledger.name, memberNames),
     buildActivityCreatedQuickReply()
   );
+}
+
+async function handleCreateLedgerFromPending(event: LineMessageEvent, name: string) {
+  const { chatId, lineUserId, chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getBoundGroup(chatId);
+  if (!binding) {
+    return getBindGroupMessage();
+  }
+
+  if (!lineUserId) {
+    return "目前抓不到你的 LINE 身分，請稍後再試。";
+  }
+
+  const pendingState = await getPendingActionState({
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: AWAITING_ACTIVITY_NAME_ACTION
+  });
+
+  if (pendingState.expired) {
+    return getAwaitingActivityNameExpiredPrompt();
+  }
+
+  if (!pendingState.pending) {
+    return getAwaitingActivityNameExpiredPrompt();
+  }
+
+  await clearPendingAction({
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: AWAITING_ACTIVITY_NAME_ACTION
+  });
+
+  return handleCreateLedgerCommand(event, name);
 }
 
 async function handleJoinOrLeave(
@@ -657,7 +737,7 @@ async function handleJoinOrLeaveWithRoster(
 }
 
 async function handleConfirmMembers(event: LineMessageEvent) {
-  const { chatId, chatType } = getChatContext(event.source);
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -666,6 +746,20 @@ async function handleConfirmMembers(event: LineMessageEvent) {
   const binding = await getBoundGroup(chatId);
   if (!binding) {
     return getBindGroupMessage();
+  }
+
+  const activeLedger = await getActiveLedger(binding.group.id);
+
+  if (!activeLedger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (
+    activeLedger.creatorLineUserId &&
+    lineUserId &&
+    activeLedger.creatorLineUserId !== lineUserId
+  ) {
+    return "只有本次活動建立者可以確認成員";
   }
 
   const result = await confirmCollectingLedger(binding.group.id);
@@ -682,11 +776,14 @@ async function handleConfirmMembers(event: LineMessageEvent) {
     return "這個活動的成員已經確認完成，現在可以直接記帳。";
   }
 
+  const missingPaymentNames = await getMembersMissingPaymentMethod(result.ledger.id);
+
   return withQuickReply(
-    getConfirmedMembersPrompt(
-      result.ledger.name,
-      result.participants.map((participant) => participant.displayName)
-    ),
+    getConfirmedMembersPrompt({
+      activityName: result.ledger.name,
+      memberNames: result.participants.map((participant) => participant.displayName),
+      missingPaymentNames
+    }),
     buildActivityConfirmedQuickReply()
   );
 }
@@ -1050,14 +1147,20 @@ async function handlePendingConfirmation(event: LineMessageEvent, approved: bool
     return null;
   }
 
-  const pending = await getPendingAction(chatId);
+  const pending = await getPendingAction({
+    chatId,
+    requesterLineUserId: lineUserId
+  });
 
   if (!pending || pending.requesterLineUserId !== lineUserId) {
     return null;
   }
 
   if (!approved) {
-    await clearPendingAction(chatId);
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId
+    });
     return "好勒，這次就先取消。";
   }
 
@@ -1068,7 +1171,10 @@ async function handlePendingConfirmation(event: LineMessageEvent, approved: bool
       }
     });
 
-    await clearPendingAction(chatId);
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId
+    });
 
     if (!expense) {
       return "找不到要刪除的那筆支出，可能已經被刪掉了。";
@@ -1085,7 +1191,10 @@ async function handlePendingConfirmation(event: LineMessageEvent, approved: bool
 
   if (pending.actionType === PendingActionType.archive_active_ledger) {
     const binding = await getBoundGroup(chatId);
-    await clearPendingAction(chatId);
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId
+    });
 
     if (!binding) {
       return getBindGroupMessage();
@@ -1123,7 +1232,38 @@ async function handleMessageEvent(event: LineMessageEvent) {
     }
   }
 
+  const rawText = event.message.text.trim();
   const parsed = parseLineCommand(event.message.text);
+
+  if (lineUserId) {
+    const pendingState = await getPendingActionState({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: AWAITING_ACTIVITY_NAME_ACTION
+    });
+
+    if (pendingState.pending) {
+      if (parsed.kind === "cancel") {
+        await clearPendingAction({
+          chatId,
+          requesterLineUserId: lineUserId,
+          actionType: AWAITING_ACTIVITY_NAME_ACTION
+        });
+
+        return "已取消建立活動";
+      }
+
+      if (parsed.kind === "ignored" && rawText) {
+        return handleCreateLedgerFromPending(event, rawText);
+      }
+    } else if (
+      pendingState.expired &&
+      parsed.kind === "ignored" &&
+      rawText
+    ) {
+      return getAwaitingActivityNameExpiredPrompt();
+    }
+  }
 
   if (parsed.kind === "confirm") {
     return handlePendingConfirmation(event, true);
@@ -1189,12 +1329,40 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
 
     case "create-ledger":
       if (!command.name) {
-        return "請輸入：1活動名稱 或 建立活動 活動名稱";
+        if (chatType === "user") {
+          return getGroupOnlyMessage();
+        }
+
+        const binding = await getBoundGroup(chatId);
+        if (!binding) {
+          return getBindGroupMessage();
+        }
+
+        return startAwaitingActivityName({
+          groupId: binding.group.id,
+          chatId,
+          lineUserId
+        });
       }
       return handleCreateLedgerCommand(event, command.name);
 
     case "create-ledger-help":
-      return "請輸入：1活動名稱 或 建立活動 活動名稱";
+      if (chatType === "user") {
+        return getGroupOnlyMessage();
+      }
+
+      return (async () => {
+        const binding = await getBoundGroup(chatId);
+        if (!binding) {
+          return getBindGroupMessage();
+        }
+
+        return startAwaitingActivityName({
+          groupId: binding.group.id,
+          chatId,
+          lineUserId
+        });
+      })();
 
     case "switch-ledger":
       if (chatType === "user") {

@@ -15,6 +15,7 @@ enum LedgerStatus {
 }
 
 enum PendingActionType {
+  awaiting_activity_name
   delete_recent_expense
   archive_active_ledger
 }

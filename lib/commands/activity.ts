@@ -15,15 +15,30 @@ export function getCollectingMembersPrompt(activityName: string, memberNames: st
     "+ / +1 加入",
     "- / -1 退出",
     "",
-    "全部確認後請輸入：確認成員"
+    "全部確認後請按「確認成員」"
   ].join("\n");
 }
 
-export function getConfirmedMembersPrompt(activityName: string, memberNames: string[]) {
+export function getConfirmedMembersPrompt(input: {
+  activityName: string;
+  memberNames: string[];
+  missingPaymentNames: string[];
+}) {
+  const paymentSummary =
+    input.missingPaymentNames.length > 0
+      ? [
+          "尚未設定收款方式：",
+          input.missingPaymentNames.join("、")
+        ].join("\n")
+      : "所有成員都已設定收款方式";
+
   return [
-    `已確認本次活動成員：${activityName}`,
-    ...memberNames.map((name, index) => `${index + 1}. ${name}`),
-    "現在可以開始記帳"
+    `已確認活動：${input.activityName}`,
+    `目前成員：${input.memberNames.join("、")}`,
+    "",
+    paymentSummary,
+    "",
+    "現在可以開始記帳。"
   ].join("\n");
 }
 

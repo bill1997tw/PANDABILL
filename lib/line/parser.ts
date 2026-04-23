@@ -46,7 +46,7 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "confirm" };
   }
 
-  if (["否", "n", "N", "no", "NO"].includes(normalized)) {
+  if (["否", "取消", "不用了", "n", "N", "no", "NO"].includes(normalized)) {
     return { kind: "cancel" };
   }
 
