@@ -1,25 +1,11 @@
 export type MenuMode = "xiaoer" | "settlement";
 
 export function getXiaoerMenuText() {
-  return [
-    "小的來哩～大人有什麼吩咐~",
-    "1【建立活動】",
-    "2【確認成員】",
-    "3【私聊設定收款方式】",
-    "4【支出】",
-    "5【查看支出】",
-    "6【刪除最近一筆支出】"
-  ].join("\n");
+  return "小的來哩～大人有什麼吩咐~";
 }
 
 export function getSettlementMenuText() {
-  return [
-    "好勒~ 以下是小二能幫大人做的",
-    "1【帳本結算】",
-    "2【代墊MVP】",
-    "3【結束活動同時封存帳本】",
-    "4【查看封存帳本】"
-  ].join("\n");
+  return "好勒~ 以下是小二能幫大人做的";
 }
 
 export function getExpenseGuideText() {
@@ -34,5 +20,5 @@ export function getExpenseGuideText() {
 }
 
 export function getPaymentSetupGuideText() {
-  return "請私聊我使用此功能。";
+  return "請私聊我使用此功能";
 }

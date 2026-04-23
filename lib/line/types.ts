@@ -48,6 +48,7 @@ export type ParsedLineCommand =
   | { kind: "join-activity" }
   | { kind: "leave-activity" }
   | { kind: "confirm-members" }
+  | { kind: "list-members" }
   | { kind: "confirm" }
   | { kind: "cancel" }
   | { kind: "create-ledger"; name: string }

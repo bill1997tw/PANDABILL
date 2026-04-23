@@ -1,11 +1,36 @@
+import type { LineQuickReply } from "@/lib/line/quick-reply";
+
 const LINE_REPLY_ENDPOINT = "https://api.line.me/v2/bot/message/reply";
+
+export type LineTextReplyPayload =
+  | string
+  | {
+      text: string;
+      quickReply?: LineQuickReply;
+    };
 
 type LineTextMessage = {
   type: "text";
   text: string;
+  quickReply?: LineQuickReply;
 };
 
-export async function replyLineText(replyToken: string, text: string) {
+function toLineTextMessage(input: LineTextReplyPayload): LineTextMessage {
+  if (typeof input === "string") {
+    return {
+      type: "text",
+      text: input
+    };
+  }
+
+  return {
+    type: "text",
+    text: input.text,
+    quickReply: input.quickReply
+  };
+}
+
+export async function replyLineText(replyToken: string, input: LineTextReplyPayload) {
   const accessToken = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
   if (!accessToken) {
@@ -20,7 +45,7 @@ export async function replyLineText(replyToken: string, text: string) {
     },
     body: JSON.stringify({
       replyToken,
-      messages: [{ type: "text", text } satisfies LineTextMessage]
+      messages: [toLineTextMessage(input)]
     })
   });
 

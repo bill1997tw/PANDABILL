@@ -76,6 +76,10 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "confirm-members" };
   }
 
+  if (["查看成員", "成員名單"].includes(normalized)) {
+    return { kind: "list-members" };
+  }
+
   if (
     normalized === "查看支出" ||
     normalized === "最近支出" ||
@@ -137,7 +141,8 @@ export function parseLineCommand(text: string): ParsedLineCommand {
   if (
     normalized === "3設定收款" ||
     normalized === "3 設定收款" ||
-    normalized === "設定收款方式"
+    normalized === "設定收款方式" ||
+    normalized === "設定收款"
   ) {
     return { kind: "start-payment-setup" };
   }

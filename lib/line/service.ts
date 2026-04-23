@@ -60,6 +60,17 @@ import {
 } from "@/lib/line-user-profile";
 import { parseLineCommand } from "@/lib/line/parser";
 import { getLineDisplayName } from "@/lib/line/profile";
+import {
+  buildActivityConfirmedQuickReply,
+  buildActivityCreatedQuickReply,
+  buildArchivedLedgerQuickReply,
+  buildAssistantQuickReply,
+  buildExpenseQuickReply,
+  buildSettlementQuickReply,
+  buildSettlementResultQuickReply,
+  type LineQuickReply
+} from "@/lib/line/quick-reply";
+import type { LineTextReplyPayload } from "@/lib/line/client";
 import type { LineEvent, LineMessageEvent, ParsedLineCommand } from "@/lib/line/types";
 
 function getChatContext(source: LineEvent["source"]) {
@@ -111,6 +122,17 @@ function getGroupOnlyMessage() {
 
 function getBindGroupMessage() {
   return "這個聊天室還沒綁定群組，請先輸入：綁定群組 綁定碼";
+}
+
+function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextReplyPayload {
+  if (!quickReply) {
+    return text;
+  }
+
+  return {
+    text,
+    quickReply
+  };
 }
 
 function parseBooleanChoice(text: string) {
@@ -510,14 +532,20 @@ async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) 
   );
 
   if (result.previousActiveName) {
-    return [
-      `已建立活動：${result.ledger.name}，並設為目前帳本`,
-      `上一個活動 ${result.previousActiveName} 已自動結束`,
-      getCollectingMembersPrompt(result.ledger.name, memberNames)
-    ].join("\n\n");
+    return withQuickReply(
+      [
+        `已建立活動：${result.ledger.name}，並設為目前帳本`,
+        `上一個活動 ${result.previousActiveName} 已自動結束`,
+        getCollectingMembersPrompt(result.ledger.name, memberNames)
+      ].join("\n\n"),
+      buildActivityCreatedQuickReply()
+    );
   }
 
-  return getCollectingMembersPrompt(result.ledger.name, memberNames);
+  return withQuickReply(
+    getCollectingMembersPrompt(result.ledger.name, memberNames),
+    buildActivityCreatedQuickReply()
+  );
 }
 
 async function handleJoinOrLeave(
@@ -654,10 +682,39 @@ async function handleConfirmMembers(event: LineMessageEvent) {
     return "這個活動的成員已經確認完成，現在可以直接記帳。";
   }
 
-  return getConfirmedMembersPrompt(
-    result.ledger.name,
-    result.participants.map((participant) => participant.displayName)
+  return withQuickReply(
+    getConfirmedMembersPrompt(
+      result.ledger.name,
+      result.participants.map((participant) => participant.displayName)
+    ),
+    buildActivityConfirmedQuickReply()
   );
+}
+
+async function handleListMembers(chatId: string, chatType: "user" | "group" | "room") {
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getBoundGroup(chatId);
+  if (!binding) {
+    return getBindGroupMessage();
+  }
+
+  const active = await getActiveLedgerParticipants(binding.group.id);
+
+  if (!active.ledger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (active.participants.length === 0) {
+    return `目前活動：${active.ledger.name}\n目前尚未有報名成員`;
+  }
+
+  return [
+    `目前活動：${active.ledger.name}`,
+    `目前成員：${active.participants.map((participant) => participant.displayName).join("、")}`
+  ].join("\n");
 }
 
 async function resolvePayerMember(input: {
@@ -788,15 +845,21 @@ async function handleRecentExpenses(chatId: string, chatType: "user" | "group" |
   }
 
   if (result.expenses.length === 0) {
-    return [`目前活動：${result.activeLedger.name}`, "目前還沒有支出紀錄"].join("\n");
+    return withQuickReply(
+      [`目前活動：${result.activeLedger.name}`, "目前還沒有支出紀錄"].join("\n"),
+      buildExpenseQuickReply()
+    );
   }
 
-  return [
-    `目前活動：${result.activeLedger.name}`,
-    `目前消費總額：NT$ ${formatCents(result.totalExpenseCents)}`,
-    "最近支出：",
-    ...result.expenses.map(formatExpenseLine)
-  ].join("\n");
+  return withQuickReply(
+    [
+      `目前活動：${result.activeLedger.name}`,
+      `目前消費總額：NT$ ${formatCents(result.totalExpenseCents)}`,
+      "最近支出：",
+      ...result.expenses.map(formatExpenseLine)
+    ].join("\n"),
+    buildExpenseQuickReply()
+  );
 }
 
 async function handleDeleteLastExpense(event: LineMessageEvent) {
@@ -860,11 +923,14 @@ async function handleSettlement(chatId: string, chatType: "user" | "group" | "ro
     return getNoActiveLedgerText();
   }
 
-  return getSettlementSummaryText({
-    activityName: snapshot.activeLedger.name,
-    totalExpenseDisplay: snapshot.summary.totalExpenseDisplay,
-    transfers: snapshot.summary.settlement
-  });
+  return withQuickReply(
+    getSettlementSummaryText({
+      activityName: snapshot.activeLedger.name,
+      totalExpenseDisplay: snapshot.summary.totalExpenseDisplay,
+      transfers: snapshot.summary.settlement
+    }),
+    buildSettlementResultQuickReply()
+  );
 }
 
 async function handleMvp(chatId: string, chatType: "user" | "group" | "room") {
@@ -884,15 +950,21 @@ async function handleMvp(chatId: string, chatType: "user" | "group" | "room") {
   }
 
   if (!snapshot.winner) {
-    return `目前活動：${snapshot.activeLedger.name}\n目前還沒有支出資料，還選不出代墊 MVP。`;
+    return withQuickReply(
+      `目前活動：${snapshot.activeLedger.name}\n目前還沒有支出資料，還選不出代墊 MVP。`,
+      buildSettlementResultQuickReply()
+    );
   }
 
-  return getMvpText({
-    activityName: snapshot.activeLedger.name,
-    memberName: snapshot.winner.memberName,
-    advanceCount: snapshot.winner.advanceCount,
-    totalPaidCents: snapshot.winner.totalPaidCents
-  });
+  return withQuickReply(
+    getMvpText({
+      activityName: snapshot.activeLedger.name,
+      memberName: snapshot.winner.memberName,
+      advanceCount: snapshot.winner.advanceCount,
+      totalPaidCents: snapshot.winner.totalPaidCents
+    }),
+    buildSettlementResultQuickReply()
+  );
 }
 
 async function handleArchivePrompt(event: LineMessageEvent) {
@@ -948,24 +1020,27 @@ async function handleArchivedLedgers(chatId: string, chatType: "user" | "group" 
   const ledgers = await getArchivedLedgerSnapshots(binding.group.id, 5);
 
   if (ledgers.length === 0) {
-    return "目前沒有封存帳本。";
+    return withQuickReply("目前沒有封存帳本。", buildArchivedLedgerQuickReply());
   }
 
-  return [
-    "封存帳本：",
-    ...ledgers.map((ledger) => {
-      const mvpText = ledger.mvp
-        ? `${ledger.mvp.memberName} / ${ledger.mvp.advanceCount} 次`
-        : "尚無";
+  return withQuickReply(
+    [
+      "封存帳本：",
+      ...ledgers.map((ledger) => {
+        const mvpText = ledger.mvp
+          ? `${ledger.mvp.memberName} / ${ledger.mvp.advanceCount} 次`
+          : "尚無";
 
-      return [
-        `【${ledger.name}】`,
-        `總金額：NT$ ${ledger.totalExpenseDisplay}`,
-        `代墊MVP：${mvpText}`,
-        `成員：${ledger.members.join("、") || "無"}`
-      ].join("\n");
-    })
-  ].join("\n\n");
+        return [
+          `【${ledger.name}】`,
+          `總金額：NT$ ${ledger.totalExpenseDisplay}`,
+          `代墊MVP：${mvpText}`,
+          `成員：${ledger.members.join("、") || "無"}`
+        ].join("\n");
+      })
+    ].join("\n\n"),
+    buildArchivedLedgerQuickReply()
+  );
 }
 
 async function handlePendingConfirmation(event: LineMessageEvent, approved: boolean) {
@@ -1086,7 +1161,7 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
           mode: "xiaoer"
         });
       }
-      return getXiaoerMenuText();
+      return withQuickReply(getXiaoerMenuText(), buildAssistantQuickReply());
 
     case "settlement-help":
       if (lineUserId) {
@@ -1098,7 +1173,7 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
           mode: "settlement"
         });
       }
-      return getSettlementMenuText();
+      return withQuickReply(getSettlementMenuText(), buildSettlementQuickReply());
 
     case "join-activity":
       return handleJoinOrLeaveWithRoster(event, "join");
@@ -1108,6 +1183,9 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
 
     case "confirm-members":
       return handleConfirmMembers(event);
+
+    case "list-members":
+      return handleListMembers(chatId, chatType);
 
     case "create-ledger":
       if (!command.name) {
@@ -1213,7 +1291,7 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
       return handleRecentExpenses(chatId, chatType);
 
     case "expense-help":
-      return getExpenseGuideText();
+      return withQuickReply(getExpenseGuideText(), buildExpenseQuickReply());
 
     case "start-payment-setup":
       if (!lineUserId || chatType !== "user") {
