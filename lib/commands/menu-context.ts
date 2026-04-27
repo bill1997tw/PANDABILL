@@ -82,4 +82,3 @@ export function resolveMenuModeFromContext(
 export function getMenuContextExpiredPrompt() {
   return "請先輸入「小二」或「算帳」，小二才知道大人現在要用哪一套選單。";
 }
-

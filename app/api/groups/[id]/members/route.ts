@@ -13,7 +13,7 @@ type Props = {
 export async function POST(request: Request, { params }: Props) {
   try {
     const body = await request.json();
-    const name = assertNonEmptyString(body.name, "成員名稱");
+    const name = assertNonEmptyString(body.name, "請輸入成員名稱");
 
     const group = await db.group.findUnique({
       where: {

@@ -14,6 +14,11 @@ enum LedgerStatus {
   archived
 }
 
+enum GroupStatus {
+  active
+  inactive
+}
+
 enum PendingActionType {
   awaiting_activity_name
   delete_recent_expense
@@ -26,34 +31,40 @@ enum MenuContextType {
 }
 
 model Group {
-  id           String            @id @default(cuid())
-  name         String
-  lineJoinCode String            @unique
-  createdAt    DateTime          @default(now())
-  members      Member[]
-  ledgers      Ledger[]
-  expenses     Expense[]
-  lineBindings LineChatBinding[]
+  id             String            @id @default(cuid())
+  lineGroupId    String?           @unique
+  name           String?
+  status         GroupStatus       @default(active)
+  lineJoinCode   String            @unique
+  currentSessionId String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  members        Member[]
+  ledgers        Ledger[]          @relation("GroupSessions")
+  currentSession Ledger?           @relation("CurrentGroupSession", fields: [currentSessionId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  expenses       Expense[]
+  lineBindings   LineChatBinding[]
   pendingActions PendingAction[]
   menuContexts MenuContext[]
 }
 
 model Ledger {
-  id         String       @id @default(cuid())
-  groupId    String
-  name       String
-  status     LedgerStatus @default(active)
-  creatorLineUserId String?
-  isCollectingMembers Boolean @default(false)
-  startedAt  DateTime     @default(now())
-  endedAt    DateTime?
-  archivedAt DateTime?
-  isActive   Boolean      @default(false)
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
-  group      Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  expenses   Expense[]
-  participants LedgerParticipant[]
+  id                  String       @id @default(cuid())
+  groupId             String
+  name                String
+  status              LedgerStatus @default(active)
+  creatorLineUserId   String?
+  isCollectingMembers Boolean      @default(false)
+  startedAt           DateTime     @default(now())
+  endedAt             DateTime?
+  archivedAt          DateTime?
+  isActive            Boolean      @default(false)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+  group               Group        @relation("GroupSessions", fields: [groupId], references: [id], onDelete: Cascade)
+  currentForGroups    Group[]      @relation("CurrentGroupSession")
+  expenses            Expense[]
+  participants        LedgerParticipant[]
 
   @@unique([groupId, name])
   @@index([groupId, isActive])

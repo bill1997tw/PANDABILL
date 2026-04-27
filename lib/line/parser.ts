@@ -68,6 +68,14 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "current-ledger" };
   }
 
+  if (normalized === "重置活動") {
+    return { kind: "reset-ledger" };
+  }
+
+  if (normalized === "群組資訊") {
+    return { kind: "group-info" };
+  }
+
   if (["查看帳本", "帳本列表", "查看活動"].includes(normalized)) {
     return { kind: "list-ledgers" };
   }
@@ -80,31 +88,24 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "list-members" };
   }
 
-  if (
-    normalized === "查看支出" ||
-    normalized === "最近支出" ||
-    normalized === "5查看支出" ||
-    normalized === "5 查看支出"
-  ) {
+  if (["查看支出", "最近支出", "5查看支出", "5 查看支出"].includes(normalized)) {
     return { kind: "recent-expenses" };
   }
 
-  if (normalized === "支出" || normalized === "4支出" || normalized === "4 支出") {
+  if (["支出", "4支出", "4 支出"].includes(normalized)) {
     return { kind: "expense-help" };
   }
 
   if (
-    normalized === "刪除最近一筆支出" ||
-    normalized === "6刪除最近一筆支出" ||
-    normalized === "6 刪除最近一筆支出"
+    ["刪除最近一筆支出", "6刪除最近一筆支出", "6 刪除最近一筆支出"].includes(
+      normalized
+    )
   ) {
     return { kind: "delete-last-expense" };
   }
 
   if (
-    normalized === "帳本結算" ||
-    normalized === "查看結算" ||
-    normalized === "結算" ||
+    ["帳本結算", "查看結算", "結算"].includes(normalized) ||
     /^1\s*帳本結算$/u.test(normalized)
   ) {
     return { kind: "settlement" };
@@ -115,17 +116,14 @@ export function parseLineCommand(text: string): ParsedLineCommand {
   }
 
   if (
-    normalized === "結束活動" ||
-    normalized === "結束活動同時封存帳本" ||
+    ["結束活動", "結束活動同時封存帳本"].includes(normalized) ||
     /^3\s*結束活動$/u.test(normalized)
   ) {
     return { kind: "close-ledger" };
   }
 
   if (
-    normalized === "查看封存帳本" ||
-    normalized === "查看歷史帳本" ||
-    normalized === "查看封存活動" ||
+    ["查看封存帳本", "查看歷史帳本", "查看封存活動"].includes(normalized) ||
     /^4\s*查看封存帳本$/u.test(normalized)
   ) {
     return { kind: "list-archived-ledgers" };
@@ -139,10 +137,7 @@ export function parseLineCommand(text: string): ParsedLineCommand {
   }
 
   if (
-    normalized === "3設定收款" ||
-    normalized === "3 設定收款" ||
-    normalized === "設定收款方式" ||
-    normalized === "設定收款"
+    ["3設定收款", "3 設定收款", "設定收款方式", "設定收款"].includes(normalized)
   ) {
     return { kind: "start-payment-setup" };
   }

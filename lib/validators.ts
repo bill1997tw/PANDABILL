@@ -1,6 +1,6 @@
 export function assertNonEmptyString(value: unknown, fieldName: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${fieldName}不能為空白。`);
+    throw new Error(`${fieldName}不能是空白。`);
   }
 
   return value.trim();

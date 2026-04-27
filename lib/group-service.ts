@@ -3,14 +3,15 @@ import { Prisma } from "@prisma/client";
 import { splitAmountEvenly } from "@/lib/calcSplit";
 import { formatCents, parseAmountToCents } from "@/lib/currency";
 import { db } from "@/lib/db";
+import { buildGroupSummary } from "@/lib/groupSummary";
+import { generateJoinCode } from "@/lib/join-code";
 import {
   getActiveLedger,
   getActiveLedgerParticipants,
   listLedgers,
   serializeLedger
 } from "@/lib/ledger-service";
-import { buildGroupSummary } from "@/lib/groupSummary";
-import { generateJoinCode } from "@/lib/join-code";
+import type { LineEventSource } from "@/lib/line/types";
 import { serializeExpense } from "@/lib/serialize";
 import { assertNonEmptyString, assertStringArray } from "@/lib/validators";
 
@@ -59,6 +60,18 @@ function emptySummary() {
     memberBalances: [] as ReturnType<typeof buildGroupSummary>["memberBalances"],
     settlement: [] as ReturnType<typeof buildGroupSummary>["settlement"]
   };
+}
+
+function getDefaultGroupName(lineGroupId: string) {
+  if (lineGroupId.startsWith("room:")) {
+    return `LINE 房間 ${lineGroupId.slice(-4)}`;
+  }
+
+  return `LINE 群組 ${lineGroupId.slice(-4)}`;
+}
+
+function normalizeLineGroupId(chatType: "group" | "room", rawId: string) {
+  return chatType === "room" ? `room:${rawId}` : rawId;
 }
 
 async function getGroupMemberPaymentMap(memberNames: string[]) {
@@ -118,14 +131,16 @@ async function getGroupWithMembers(groupId: string) {
   });
 }
 
-export async function createGroup(nameInput: unknown) {
-  const name = assertNonEmptyString(nameInput, "群組名稱");
-
+async function createGroupRecord(input: {
+  name: string;
+  lineGroupId?: string | null;
+}) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       return await db.group.create({
         data: {
-          name,
+          name: input.name,
+          lineGroupId: input.lineGroupId ?? null,
           lineJoinCode: generateJoinCode()
         }
       });
@@ -141,7 +156,155 @@ export async function createGroup(nameInput: unknown) {
     }
   }
 
-  throw new Error("建立群組失敗，請再試一次。");
+  throw new Error("建立群組失敗，請稍後再試。");
+}
+
+export function getLineContainerId(source: LineEventSource) {
+  if (source.type === "group" && source.groupId) {
+    return {
+      chatId: source.groupId,
+      chatType: "group" as const,
+      lineGroupId: normalizeLineGroupId("group", source.groupId)
+    };
+  }
+
+  if (source.type === "room" && source.roomId) {
+    return {
+      chatId: source.roomId,
+      chatType: "room" as const,
+      lineGroupId: normalizeLineGroupId("room", source.roomId)
+    };
+  }
+
+  return null;
+}
+
+export async function getOrCreateGroupContext(source: LineEventSource) {
+  const container = getLineContainerId(source);
+
+  if (!container) {
+    return null;
+  }
+
+  try {
+    const existingBinding = await db.lineChatBinding.findUnique({
+      where: {
+        chatId: container.chatId
+      },
+      include: {
+        group: {
+          include: {
+            members: {
+              orderBy: {
+                createdAt: "asc"
+              }
+            }
+          }
+        }
+      }
+    });
+
+    if (existingBinding) {
+      const bindingUpdates: Prisma.LineChatBindingUpdateInput = {};
+
+      if (existingBinding.chatType !== container.chatType) {
+        bindingUpdates.chatType = container.chatType;
+      }
+
+      if (source.userId && existingBinding.lineUserId !== source.userId) {
+        bindingUpdates.lineUserId = source.userId;
+      }
+
+      if (Object.keys(bindingUpdates).length > 0) {
+        await db.lineChatBinding.update({
+          where: { id: existingBinding.id },
+          data: bindingUpdates
+        });
+      }
+
+      if (existingBinding.group.lineGroupId !== container.lineGroupId) {
+        await db.group.update({
+          where: { id: existingBinding.group.id },
+          data: {
+            lineGroupId: container.lineGroupId,
+            status: "active"
+          }
+        });
+      }
+
+      return {
+        ...existingBinding,
+        group: {
+          ...existingBinding.group,
+          lineGroupId: container.lineGroupId
+        }
+      };
+    }
+
+    const existingGroup = await db.group.findUnique({
+      where: {
+        lineGroupId: container.lineGroupId
+      },
+      include: {
+        members: {
+          orderBy: {
+            createdAt: "asc"
+          }
+        }
+      }
+    });
+
+    const group =
+      existingGroup ??
+      (await createGroupRecord({
+        name: getDefaultGroupName(container.lineGroupId),
+        lineGroupId: container.lineGroupId
+      }));
+
+    return db.lineChatBinding.upsert({
+      where: {
+        chatId: container.chatId
+      },
+      update: {
+        groupId: group.id,
+        chatType: container.chatType,
+        lineUserId: source.userId ?? null
+      },
+      create: {
+        chatId: container.chatId,
+        chatType: container.chatType,
+        lineUserId: source.userId ?? null,
+        groupId: group.id
+      },
+      include: {
+        group: {
+          include: {
+            members: {
+              orderBy: {
+                createdAt: "asc"
+              }
+            }
+          }
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Failed to get or create group context", { source, error });
+    return null;
+  }
+}
+
+export async function createGroup(
+  nameInput: unknown,
+  options?: {
+    lineGroupId?: string | null;
+  }
+) {
+  const name = assertNonEmptyString(nameInput, "群組名稱");
+  return createGroupRecord({
+    name,
+    lineGroupId: options?.lineGroupId ?? null
+  });
 }
 
 export async function getGroupDetail(groupId: string) {
@@ -180,12 +343,11 @@ export async function getGroupDetail(groupId: string) {
     : [];
 
   const activeMembers = activeParticipants.participants.map((participant) => participant.member);
-
   const summary =
     activeLedger && activeMembers.length > 0
       ? buildGroupSummary({
           id: group.id,
-          name: group.name,
+          name: group.name ?? getDefaultGroupName(group.lineGroupId ?? group.id),
           createdAt: group.createdAt,
           members: activeMembers,
           expenses: activeLedgerExpenses
@@ -199,15 +361,20 @@ export async function getGroupDetail(groupId: string) {
   return {
     group: {
       id: group.id,
+      lineGroupId: group.lineGroupId,
       name: group.name,
+      status: group.status,
       lineJoinCode: group.lineJoinCode,
-      createdAt: group.createdAt.toISOString()
+      currentSessionId: group.currentSessionId,
+      createdAt: group.createdAt.toISOString(),
+      updatedAt: group.updatedAt.toISOString()
     },
     activeLedger: activeLedger ? serializeLedger(activeLedger) : null,
     ledgers: ledgers.map(serializeLedger),
     members: group.members.map((member) => ({
       id: member.id,
       name: member.name,
+      lineUserId: member.lineUserId,
       paymentSettingsToken: null,
       createdAt: member.createdAt.toISOString(),
       paymentProfile: paymentProfileMap.get(member.name) ?? null
@@ -223,6 +390,30 @@ export async function getGroupDetail(groupId: string) {
   };
 }
 
+export async function getGroupInfoSummary(groupId: string) {
+  const group = await db.group.findUnique({
+    where: {
+      id: groupId
+    }
+  });
+
+  if (!group) {
+    return null;
+  }
+
+  const activeLedger = await getActiveLedger(groupId);
+
+  return {
+    id: group.id,
+    lineGroupId: group.lineGroupId,
+    name: group.name ?? getDefaultGroupName(group.lineGroupId ?? group.id),
+    status: group.status,
+    createdAt: group.createdAt,
+    updatedAt: group.updatedAt,
+    activeLedgerName: activeLedger?.name ?? null
+  };
+}
+
 export async function createExpenseInGroup(input: {
   groupId: string;
   title: unknown;
@@ -233,7 +424,7 @@ export async function createExpenseInGroup(input: {
 }) {
   const title = assertNonEmptyString(input.title, "支出名稱");
   const payerId = assertNonEmptyString(input.payerId, "付款人");
-  const participantIds = assertStringArray(input.participantIds, "分攤成員");
+  const participantIds = assertStringArray(input.participantIds, "參與成員");
   const notes =
     typeof input.notes === "string" && input.notes.trim().length > 0
       ? input.notes.trim()
@@ -253,7 +444,7 @@ export async function createExpenseInGroup(input: {
   }
 
   if (activeLedger.isCollectingMembers) {
-    throw new Error("請先輸入：確認成員");
+    throw new Error("成員還在報名中，請先確認成員後再開始記帳。");
   }
 
   const activeParticipants = await db.ledgerParticipant.findMany({
@@ -270,7 +461,7 @@ export async function createExpenseInGroup(input: {
   }
 
   if (participantIds.some((participantId) => !validMemberIds.has(participantId))) {
-    throw new Error("分攤成員裡有不在本次活動名單中的人。");
+    throw new Error("有參與成員不在這次活動的已確認名單中。");
   }
 
   const shares = splitAmountEvenly(amountCents, participantIds);
@@ -393,7 +584,7 @@ export async function getSettlementSnapshot(groupId: string) {
     activeMembers.length > 0
       ? buildGroupSummary({
           id: group.id,
-          name: group.name,
+          name: group.name ?? getDefaultGroupName(group.lineGroupId ?? group.id),
           createdAt: group.createdAt,
           members: activeMembers,
           expenses
@@ -566,13 +757,9 @@ export async function getGroupListData() {
           ledgers: true
         }
       },
-      ledgers: {
-        where: {
-          isActive: true
-        },
-        take: 1,
-        orderBy: {
-          updatedAt: "desc"
+      currentSession: {
+        select: {
+          name: true
         }
       }
     }
@@ -580,13 +767,16 @@ export async function getGroupListData() {
 
   return groups.map((group) => ({
     id: group.id,
+    lineGroupId: group.lineGroupId,
     name: group.name,
+    status: group.status,
     lineJoinCode: group.lineJoinCode,
     createdAt: group.createdAt.toISOString(),
+    updatedAt: group.updatedAt.toISOString(),
     memberCount: group._count.members,
     expenseCount: group._count.expenses,
     ledgerCount: group._count.ledgers,
-    activeLedgerName: group.ledgers[0]?.name ?? null
+    activeLedgerName: group.currentSession?.name ?? null
   }));
 }
 

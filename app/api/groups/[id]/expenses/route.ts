@@ -21,6 +21,6 @@ export async function POST(request: Request, { params }: Props) {
 
     return ok(result, { status: 201 });
   } catch (error) {
-    return fail(error instanceof Error ? error.message : "新增支出失敗。");
+    return fail(error instanceof Error ? error.message : "建立支出失敗。");
   }
 }

@@ -29,6 +29,6 @@ export async function POST(request: Request, { params }: Props) {
       { status: 201 }
     );
   } catch (error) {
-    return fail(error instanceof Error ? error.message : "建立活動失敗。");
+    return fail(error instanceof Error ? error.message : "建立帳本失敗。");
   }
 }

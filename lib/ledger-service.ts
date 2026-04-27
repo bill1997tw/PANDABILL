@@ -163,8 +163,45 @@ async function resolveOrCreateMember(input: {
   });
 }
 
+async function setCurrentSessionId(
+  tx: Prisma.TransactionClient,
+  groupId: string,
+  ledgerId: string | null
+) {
+  await tx.group.update({
+    where: {
+      id: groupId
+    },
+    data: {
+      currentSessionId: ledgerId
+    }
+  });
+}
+
 export async function getActiveLedger(groupId: string) {
-  const ledger = await db.ledger.findFirst({
+  const group = await db.group.findUnique({
+    where: {
+      id: groupId
+    },
+    select: {
+      currentSessionId: true
+    }
+  });
+
+  if (group?.currentSessionId) {
+    const ledger = await db.ledger.findUnique({
+      where: {
+        id: group.currentSessionId
+      },
+      select: ledgerSelect()
+    });
+
+    if (ledger && ledger.isActive) {
+      return mapLedger(ledger);
+    }
+  }
+
+  const fallbackLedger = await db.ledger.findFirst({
     where: {
       groupId,
       isActive: true
@@ -172,7 +209,7 @@ export async function getActiveLedger(groupId: string) {
     select: ledgerSelect()
   });
 
-  return ledger ? mapLedger(ledger) : null;
+  return fallbackLedger ? mapLedger(fallbackLedger) : null;
 }
 
 export async function listLedgers(groupId: string) {
@@ -259,6 +296,8 @@ export async function createLedgerForGroup(
         select: ledgerSelect()
       });
 
+      await setCurrentSessionId(tx, groupId, ledger.id);
+
       if (creator?.displayName) {
         const member = await resolveOrCreateMember({
           tx,
@@ -293,7 +332,7 @@ export async function createLedgerForGroup(
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2002"
     ) {
-      throw new Error("這個群組已經有同名活動帳本，請換一個名稱。");
+      throw new Error("這個群組裡已經有同名活動，請換一個名稱。");
     }
 
     throw error;
@@ -316,11 +355,11 @@ export async function switchActiveLedger(groupId: string, nameInput: unknown) {
     });
 
     if (!target) {
-      throw new Error("找不到這個活動帳本。");
+      throw new Error("找不到這個活動。");
     }
 
     if (target.status === LedgerStatus.archived) {
-      throw new Error("這個帳本已經封存，若要繼續使用，請重新建立新活動。");
+      throw new Error("這個活動已經封存，不能直接切回目前活動。");
     }
 
     const previousActive = await tx.ledger.findFirst({
@@ -352,6 +391,8 @@ export async function switchActiveLedger(groupId: string, nameInput: unknown) {
       },
       select: ledgerSelect()
     });
+
+    await setCurrentSessionId(tx, groupId, updated.id);
 
     return {
       ledger: mapLedger(updated),
@@ -565,6 +606,8 @@ export async function confirmCollectingLedger(groupId: string) {
       }
     });
 
+    await setCurrentSessionId(tx, groupId, updated.id);
+
     return { status: "confirmed" as const, ledger: updated, participants };
   });
 }
@@ -594,6 +637,8 @@ export async function closeActiveLedger(groupId: string) {
       select: ledgerSelect()
     });
 
+    await setCurrentSessionId(tx, groupId, null);
+
     return mapLedger(updated);
   });
 }
@@ -601,34 +646,40 @@ export async function closeActiveLedger(groupId: string) {
 export async function archiveLedger(groupId: string, nameInput: unknown) {
   const name = assertNonEmptyString(nameInput, "活動名稱");
 
-  const ledger = await db.ledger.findFirst({
-    where: {
-      groupId,
-      name: {
-        equals: name,
-        mode: "insensitive"
-      }
-    },
-    select: ledgerSelect()
+  return db.$transaction(async (tx) => {
+    const ledger = await tx.ledger.findFirst({
+      where: {
+        groupId,
+        name: {
+          equals: name,
+          mode: "insensitive"
+        }
+      },
+      select: ledgerSelect()
+    });
+
+    if (!ledger) {
+      throw new Error("找不到這個活動。");
+    }
+
+    const updated = await tx.ledger.update({
+      where: { id: ledger.id },
+      data: {
+        isActive: false,
+        isCollectingMembers: false,
+        status: LedgerStatus.archived,
+        endedAt: ledger.endedAt ?? new Date(),
+        archivedAt: ledger.archivedAt ?? new Date()
+      },
+      select: ledgerSelect()
+    });
+
+    if (ledger.isActive) {
+      await setCurrentSessionId(tx, groupId, null);
+    }
+
+    return mapLedger(updated);
   });
-
-  if (!ledger) {
-    throw new Error("找不到這個活動帳本。");
-  }
-
-  const updated = await db.ledger.update({
-    where: { id: ledger.id },
-    data: {
-      isActive: false,
-      isCollectingMembers: false,
-      status: LedgerStatus.archived,
-      endedAt: ledger.endedAt ?? new Date(),
-      archivedAt: ledger.archivedAt ?? new Date()
-    },
-    select: ledgerSelect()
-  });
-
-  return mapLedger(updated);
 }
 
 export async function archiveActiveLedger(groupId: string) {

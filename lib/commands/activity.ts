@@ -26,10 +26,7 @@ export function getConfirmedMembersPrompt(input: {
 }) {
   const paymentSummary =
     input.missingPaymentNames.length > 0
-      ? [
-          "尚未設定收款方式：",
-          input.missingPaymentNames.join("、")
-        ].join("\n")
+      ? ["尚未設定收款方式：", input.missingPaymentNames.join("、")].join("\n")
       : "所有成員都已設定收款方式";
 
   return [
@@ -50,7 +47,6 @@ export function getLedgerListText(items: ActivityListItem[]) {
   const active = items.find((item) => item.isActive);
   const recentClosed = items.filter((item) => item.status === "closed").slice(0, 3);
   const archived = items.filter((item) => item.status === "archived");
-
   const lines: string[] = ["帳本列表"];
 
   lines.push(active ? `目前進行中：${active.name}` : "目前進行中：沒有");

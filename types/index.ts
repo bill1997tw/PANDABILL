@@ -11,7 +11,7 @@ export type MemberPaymentProfileDto = {
 
 export type GroupListItem = {
   id: string;
-  name: string;
+  name: string | null;
   lineJoinCode: string;
   createdAt: string;
   memberCount: number;
@@ -91,7 +91,10 @@ export type SettlementDto = {
 export type GroupDetailDto = {
   group: {
     id: string;
-    name: string;
+    name: string | null;
+    lineGroupId: string | null;
+    status: "active" | "inactive";
+    currentSessionId: string | null;
     lineJoinCode: string;
     createdAt: string;
   };

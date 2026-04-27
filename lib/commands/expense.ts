@@ -175,9 +175,7 @@ export function parseNaturalExpense(text: string): ParsedExpenseIntent | null {
       });
     },
     () => {
-      const match = normalized.match(
-        /^(?<title>.+?)\s+(?<amount>\d+(?:\.\d{1,2})?)$/u
-      );
+      const match = normalized.match(/^(?<title>.+?)\s+(?<amount>\d+(?:\.\d{1,2})?)$/u);
 
       if (!match?.groups) {
         return null;

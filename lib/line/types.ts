@@ -16,13 +16,13 @@ export type LineMessageEvent = {
   };
 };
 
-export type LineEvent =
-  | LineMessageEvent
-  | {
-      type: "follow" | "join";
-      replyToken?: string;
-      source: LineEventSource;
-    };
+export type LineJoinLikeEvent = {
+  type: "follow" | "join";
+  replyToken?: string;
+  source: LineEventSource;
+};
+
+export type LineEvent = LineMessageEvent | LineJoinLikeEvent;
 
 export type LineWebhookBody = {
   destination: string;
@@ -54,6 +54,8 @@ export type ParsedLineCommand =
   | { kind: "create-ledger"; name: string }
   | { kind: "switch-ledger"; name: string }
   | { kind: "current-ledger" }
+  | { kind: "reset-ledger" }
+  | { kind: "group-info" }
   | { kind: "list-ledgers" }
   | { kind: "close-ledger" }
   | { kind: "archive-ledger"; name: string }

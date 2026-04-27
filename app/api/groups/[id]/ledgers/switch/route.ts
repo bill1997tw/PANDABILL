@@ -17,6 +17,6 @@ export async function POST(request: Request, { params }: Props) {
       previousActiveName: result.previousActiveName
     });
   } catch (error) {
-    return fail(error instanceof Error ? error.message : "切換活動失敗。");
+    return fail(error instanceof Error ? error.message : "切換帳本失敗。");
   }
 }

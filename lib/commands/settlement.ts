@@ -70,7 +70,7 @@ export function getMvpText(input: {
 }) {
   return [
     `目前活動：${input.activityName}`,
-    `👑 本次代墊MVP：${input.memberName}`,
+    `本次代墊MVP：${input.memberName}`,
     `共代墊 ${input.advanceCount} 次，總金額 ${formatCents(input.totalPaidCents)} 元`,
     "太罩了大人，小二佩服的五~體~投~地~"
   ].join("\n");
