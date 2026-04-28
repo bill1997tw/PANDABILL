@@ -1,4 +1,4 @@
-import { PendingActionType } from "@prisma/client";
+import { PendingActionType, Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 
@@ -48,6 +48,7 @@ export async function createPendingAction(input: {
   actionType: PendingActionType;
   targetExpenseId?: string | null;
   targetLedgerId?: string | null;
+  payload?: Prisma.InputJsonValue | null;
   ttlMinutes?: number;
 }) {
   await db.pendingAction.deleteMany({
@@ -65,6 +66,7 @@ export async function createPendingAction(input: {
       actionType: input.actionType,
       targetExpenseId: input.targetExpenseId ?? null,
       targetLedgerId: input.targetLedgerId ?? null,
+      payload: input.payload ?? Prisma.JsonNull,
       expiresAt: getExpiresAt(input.ttlMinutes)
     }
   });

@@ -21,6 +21,7 @@ enum GroupStatus {
 
 enum PendingActionType {
   awaiting_activity_name
+  awaiting_expense_details
   delete_recent_expense
   archive_active_ledger
 }
@@ -182,6 +183,7 @@ model PendingAction {
   actionType          PendingActionType
   targetExpenseId     String?
   targetLedgerId      String?
+  payload             Json?
   expiresAt           DateTime
   createdAt           DateTime          @default(now())
   group               Group             @relation(fields: [groupId], references: [id], onDelete: Cascade)

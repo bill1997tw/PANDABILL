@@ -18,9 +18,7 @@ export function formatSettlementPayment(profile: SettlementPaymentProfile) {
   const lines: string[] = [];
 
   if (profile.acceptBankTransfer && profile.bankAccount) {
-    lines.push(
-      `銀行匯款：${[profile.bankName, profile.bankAccount].filter(Boolean).join(" / ")}`
-    );
+    lines.push(`銀行匯款：${[profile.bankName, profile.bankAccount].filter(Boolean).join(" / ")}`);
   } else {
     lines.push("銀行匯款：不收");
   }

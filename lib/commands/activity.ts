@@ -15,8 +15,7 @@ export function getCollectingMembersPrompt(activityName: string, memberNames: st
     "+ / +1 加入",
     "- / -1 退出",
     "",
-    "全部確認後請按「確認成員」",
-    "記帳範例：晚餐 600 我付"
+    "全部確認後請按「確認成員」"
   ].join("\n");
 }
 
@@ -68,5 +67,5 @@ export function getLedgerListText(items: ActivityListItem[]) {
 }
 
 export function getNoActiveLedgerText() {
-  return "目前沒有進行中的帳本，請先輸入：建立活動 活動名稱";
+  return "目前沒有進行中的活動，請先輸入：建立活動 活動名稱";
 }

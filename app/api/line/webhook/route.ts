@@ -70,9 +70,7 @@ export async function POST(request: Request) {
         try {
           await replyLineText(
             event.replyToken,
-            error instanceof Error
-              ? `處理失敗：${error.message}`
-              : "處理訊息時發生錯誤。"
+            error instanceof Error ? `處理失敗：${error.message}` : "處理訊息時發生錯誤。"
           );
         } catch (replyError) {
           console.error("LINE fallback reply failed", replyError);

@@ -6,7 +6,7 @@ function normalize(text: string) {
 }
 
 function parseShortcut(text: string): ParsedLineCommand | null {
-  const match = text.match(/^([1-6])\s*(.*)$/u);
+  const match = text.match(/^([1-7])\s*(.*)$/u);
 
   if (!match) {
     return null;
@@ -80,7 +80,7 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "list-ledgers" };
   }
 
-  if (["確認成員", "2確認成員", "2 確認成員"].includes(normalized)) {
+  if (["確認成員", "3確認成員", "3 確認成員"].includes(normalized)) {
     return { kind: "confirm-members" };
   }
 
@@ -88,16 +88,28 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "list-members" };
   }
 
-  if (["查看支出", "最近支出", "5查看支出", "5 查看支出"].includes(normalized)) {
+  if (
+    ["查看支出", "查看目前支出", "最近支出", "6查看目前支出", "6 查看目前支出"].includes(
+      normalized
+    )
+  ) {
     return { kind: "recent-expenses" };
   }
 
-  if (["支出", "4支出", "4 支出"].includes(normalized)) {
+  if (
+    normalized === "新增支出" ||
+    normalized === "5新增支出" ||
+    normalized === "5 新增支出"
+  ) {
     return { kind: "expense-help" };
   }
 
+  if (normalized === "支出" || normalized === "5支出" || normalized === "5 支出") {
+    return { kind: "expense-help", useLegacyAlias: true };
+  }
+
   if (
-    ["刪除最近一筆支出", "刪除上一筆", "撤銷", "6刪除最近一筆支出", "6 刪除最近一筆支出"].includes(
+    ["刪除上一筆", "刪除最近一筆支出", "撤銷", "7刪除上一筆", "7 刪除上一筆"].includes(
       normalized
     )
   ) {
@@ -137,7 +149,7 @@ export function parseLineCommand(text: string): ParsedLineCommand {
   }
 
   if (
-    ["3設定收款", "3 設定收款", "設定收款方式", "設定收款"].includes(normalized)
+    ["4設定收款", "4 設定收款", "設定收款方式", "設定收款"].includes(normalized)
   ) {
     return { kind: "start-payment-setup" };
   }
@@ -168,15 +180,14 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return shortcut;
   }
 
-  const parsedExpense = parseNaturalExpense(normalized);
+  const parsedExpense = parseNaturalExpense(text.trim());
   if (parsedExpense) {
     return {
       kind: "expense",
       title: parsedExpense.title,
       amount: parsedExpense.amount,
       payerName: parsedExpense.payerName,
-      payerIsSender: parsedExpense.payerIsSender,
-      participantCount: parsedExpense.participantCount
+      payerIsSender: parsedExpense.payerIsSender
     };
   }
 

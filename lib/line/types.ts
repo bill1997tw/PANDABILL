@@ -64,7 +64,7 @@ export type ParsedLineCommand =
   | { kind: "settlement" }
   | { kind: "mvp" }
   | { kind: "recent-expenses" }
-  | { kind: "expense-help" }
+  | { kind: "expense-help"; useLegacyAlias?: boolean }
   | { kind: "create-group"; name: string }
   | { kind: "bind"; target: string }
   | { kind: "identify-self"; name: string }

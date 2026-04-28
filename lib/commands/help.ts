@@ -21,17 +21,28 @@ export function getSettlementMenuText() {
   return "好勒~ 以下是小二能幫大人做的";
 }
 
-export function getExpenseGuideText() {
-  return [
-    "可以這樣記帳：",
-    "- 晚餐 2000 阿豪付",
-    "- 我付了晚餐2000",
-    "- 阿明付計程車300",
-    "- 飲料150小美付",
-    "- 午餐 600 3人分 阿豪付"
-  ].join("\n");
+export function getExpenseGuideText(useLegacyAlias = false) {
+  const lines = [
+    "請直接輸入支出內容：",
+    "",
+    "例如：",
+    "",
+    "晚餐600我付",
+    "",
+    "飲料185",
+    "周永豪付",
+    "100陳彥廷",
+    "50張祥豪",
+    "35周永濠"
+  ];
+
+  if (!useLegacyAlias) {
+    return lines.join("\n");
+  }
+
+  return ["請使用【新增支出】", "", ...lines].join("\n");
 }
 
 export function getPaymentSetupGuideText() {
-  return "請私聊我使用此功能";
+  return "請私訊我使用此功能";
 }

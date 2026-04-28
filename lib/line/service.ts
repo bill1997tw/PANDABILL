@@ -7,6 +7,12 @@ import {
   getNoActiveLedgerText
 } from "@/lib/commands/activity";
 import {
+  parseExpenseDraftHeader,
+  parseExpensePayerLine,
+  parseExpenseShareLine,
+  splitMultilineSegments
+} from "@/lib/commands/expense";
+import {
   getExpenseGuideText,
   getPaymentSetupGuideText,
   getSettlementMenuText,
@@ -18,19 +24,18 @@ import {
   rememberMenuContext,
   resolveMenuModeFromContext
 } from "@/lib/commands/menu-context";
-import { formatPaymentSummary } from "@/lib/commands/payment";
 import {
   clearPendingAction,
   createPendingAction,
   getPendingAction,
   getPendingActionState
 } from "@/lib/commands/pending";
+import { formatPaymentSummary } from "@/lib/commands/payment";
 import { getCollectingMemberUpdateText } from "@/lib/commands/participant-roster";
 import { getMvpText, getSettlementSummaryText } from "@/lib/commands/settlement";
-import { formatCents } from "@/lib/currency";
+import { formatCents, parseAmountToCents } from "@/lib/currency";
 import { db } from "@/lib/db";
 import {
-  calculateSettlement,
   createExpenseInGroup,
   formatExpenseLine,
   getActiveLedgerExpenseMvp,
@@ -50,10 +55,10 @@ import {
   createLedgerForGroup,
   getActiveLedger,
   getActiveLedgerParticipants,
-  joinCollectingLedger,
   listLedgers,
-  switchActiveLedger,
-  leaveCollectingLedger
+  joinCollectingLedger,
+  leaveCollectingLedger,
+  switchActiveLedger
 } from "@/lib/ledger-service";
 import {
   defaultPaymentSetupDraft,
@@ -77,46 +82,55 @@ import {
   type LineQuickReply
 } from "@/lib/line/quick-reply";
 import type { LineTextReplyPayload } from "@/lib/line/client";
-import type { LineEvent, LineMessageEvent, ParsedLineCommand } from "@/lib/line/types";
+import type { LineEvent, LineJoinLikeEvent, LineMessageEvent, ParsedLineCommand } from "@/lib/line/types";
 
 const AWAITING_ACTIVITY_NAME_ACTION = PendingActionType.awaiting_activity_name;
+const AWAITING_EXPENSE_DETAILS_ACTION = PendingActionType.awaiting_expense_details;
 
-type GroupContext = NonNullable<Awaited<ReturnType<typeof getOrCreateGroupContext>>>;
+type PendingExpenseDraft = {
+  title: string;
+  amount: string;
+  payerName: string | null;
+  payerIsSender: boolean;
+  shares: Array<{
+    participantName: string;
+    amount: string;
+  }>;
+};
 
-function getChatContext(source: LineEvent["source"]) {
-  if (source.type === "group") {
-    return {
-      chatId: source.groupId ?? "",
-      chatType: "group" as const,
-      lineUserId: source.userId
-    };
-  }
+type ConfirmedParticipantRef = Awaited<
+  ReturnType<typeof getConfirmedMemberIdsForActiveLedger>
+>["participants"][number];
 
-  if (source.type === "room") {
-    return {
-      chatId: source.roomId ?? "",
-      chatType: "room" as const,
-      lineUserId: source.userId
-    };
+function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextReplyPayload {
+  if (!quickReply) {
+    return text;
   }
 
   return {
-    chatId: source.userId ?? "",
-    chatType: "user" as const,
-    lineUserId: source.userId
+    text,
+    quickReply
   };
 }
 
+function formatAmountForDisplay(cents: number) {
+  return cents % 100 === 0 ? String(cents / 100) : formatCents(cents);
+}
+
+function buildSettlementBlock(lines: string[]) {
+  return ["目前結算：", ...lines].join("\n");
+}
+
 function getGroupOnlyMessage() {
-  return "這個功能要在群組裡使用。";
+  return "請在群組裡使用這個功能。";
 }
 
 function getMissingLineIdentityMessage() {
   return "目前抓不到你的 LINE 身分，請稍後再試。";
 }
 
-function getGroupContextUnavailableMessage() {
-  return "目前暫時找不到這個群組資料，請稍後再試。";
+function getMissingGroupContextMessage() {
+  return "目前找不到這個群組的資料，請稍後再試。";
 }
 
 function getWelcomeJoinMessage() {
@@ -137,101 +151,193 @@ function getAwaitingActivityNameExpiredPrompt() {
   return "建立活動已逾時，請重新輸入「建立活動」";
 }
 
-function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextReplyPayload {
-  if (!quickReply) {
-    return text;
+function getAwaitingExpenseExpiredPrompt() {
+  return "新增支出已逾時，請重新輸入「新增支出」或重新貼上支出內容。";
+}
+
+function getAwaitingExpenseCancelledPrompt() {
+  return "已取消新增支出";
+}
+
+function getAwaitingActivityCancelledPrompt() {
+  return "已取消建立活動";
+}
+
+function getChatContext(source: LineEvent["source"]) {
+  if (source.type === "group" && source.groupId) {
+    return {
+      chatId: source.groupId,
+      chatType: "group" as const,
+      lineUserId: source.userId
+    };
+  }
+
+  if (source.type === "room" && source.roomId) {
+    return {
+      chatId: source.roomId,
+      chatType: "room" as const,
+      lineUserId: source.userId
+    };
   }
 
   return {
-    text,
-    quickReply
+    chatId: source.userId ?? "user",
+    chatType: "user" as const,
+    lineUserId: source.userId
   };
 }
 
-function parseBooleanChoice(text: string) {
-  const normalized = text.trim();
+async function resolveActorDisplayName(event: LineMessageEvent) {
+  const profileName = await getLineDisplayName(event.source);
 
-  if (["是", "可以", "收", "y", "Y", "yes", "YES"].includes(normalized)) {
-    return true;
-  }
-
-  if (["否", "不可以", "不收", "n", "N", "no", "NO"].includes(normalized)) {
-    return false;
-  }
-
-  return null;
-}
-
-function isSkipText(text: string) {
-  return ["略過", "不用", "無", "skip"].includes(text.trim());
-}
-
-function formatSpeechAmount(cents: number) {
-  if (cents % 100 === 0) {
-    return new Intl.NumberFormat("zh-TW").format(cents / 100);
-  }
-
-  return formatCents(cents);
-}
-
-async function resolveActorDisplayName(
-  event: LineMessageEvent,
-  groupContext?: GroupContext | null
-) {
-  const displayName = await getLineDisplayName(event.source);
-
-  if (displayName) {
-    return displayName;
-  }
-
-  const lineUserId = event.source.userId;
-
-  if (lineUserId) {
-    const profile = await db.lineUserProfile.findUnique({
-      where: { lineUserId }
-    });
-
-    if (profile?.memberName) {
-      return profile.memberName;
-    }
-
-    const matchedMember = groupContext?.group.members.find(
-      (member) => member.lineUserId === lineUserId
-    );
-
-    if (matchedMember) {
-      return matchedMember.name;
-    }
-
-    return `使用者${lineUserId.slice(-4)}`;
+  if (profileName) {
+    return profileName;
   }
 
   return "使用者";
 }
 
-async function requireGroupContext(event: LineMessageEvent) {
-  const { chatType } = getChatContext(event.source);
+function normalizeName(value: string) {
+  return value.trim().replace(/\s+/g, "");
+}
 
-  if (chatType === "user") {
-    return {
-      ok: false as const,
-      message: getGroupOnlyMessage()
-    };
+function findParticipantByName(
+  participants: ConfirmedParticipantRef[],
+  name: string
+) {
+  const normalized = normalizeName(name);
+
+  return participants.find((participant) => {
+    return (
+      normalizeName(participant.displayName) === normalized ||
+      normalizeName(participant.memberName) === normalized
+    );
+  });
+}
+
+function parseExpenseDraftPayload(value: Prisma.JsonValue | null | undefined): PendingExpenseDraft | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
   }
 
-  const context = await getOrCreateGroupContext(event.source);
+  const candidate = value as Record<string, unknown>;
 
-  if (!context) {
-    return {
-      ok: false as const,
-      message: getGroupContextUnavailableMessage()
-    };
+  if (typeof candidate.title !== "string" || typeof candidate.amount !== "string") {
+    return null;
   }
 
   return {
-    ok: true as const,
-    context
+    title: candidate.title,
+    amount: candidate.amount,
+    payerName: typeof candidate.payerName === "string" ? candidate.payerName : null,
+    payerIsSender: candidate.payerIsSender === true,
+    shares: Array.isArray(candidate.shares)
+      ? candidate.shares
+          .map((item) => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) {
+              return null;
+            }
+
+            const share = item as Record<string, unknown>;
+
+            if (
+              typeof share.participantName !== "string" ||
+              typeof share.amount !== "string"
+            ) {
+              return null;
+            }
+
+            return {
+              participantName: share.participantName,
+              amount: share.amount
+            };
+          })
+          .filter(
+            (
+              item
+            ): item is {
+              participantName: string;
+              amount: string;
+            } => Boolean(item)
+          )
+      : []
   };
+}
+
+function serializeExpenseDraftPayload(draft: PendingExpenseDraft): Prisma.InputJsonValue {
+  return {
+    title: draft.title,
+    amount: draft.amount,
+    payerName: draft.payerName,
+    payerIsSender: draft.payerIsSender,
+    shares: draft.shares
+  };
+}
+
+function buildExpenseDraft(title: string, amount: string): PendingExpenseDraft {
+  return {
+    title,
+    amount,
+    payerName: null,
+    payerIsSender: false,
+    shares: []
+  };
+}
+
+function buildExpenseMismatchText(totalCents: number, shareTotalCents: number) {
+  const difference = Math.abs(totalCents - shareTotalCents);
+
+  return [
+    "細項加總與總金額不一致，請確認金額。",
+    "",
+    `總金額：${formatAmountForDisplay(totalCents)}`,
+    `細項加總：${formatAmountForDisplay(shareTotalCents)}`,
+    `差額：${formatAmountForDisplay(difference)}`
+  ].join("\n");
+}
+
+function shouldStartExpenseDraft(rawText: string, parsed: ParsedLineCommand) {
+  if (parsed.kind !== "expense") {
+    return false;
+  }
+
+  if (rawText.includes("\n")) {
+    return false;
+  }
+
+  if (/[付]/u.test(rawText)) {
+    return false;
+  }
+
+  return Boolean(parseExpenseDraftHeader(rawText));
+}
+
+function getExpenseNotAllowedText() {
+  return "請先確認成員後再新增支出。";
+}
+
+function getMissingPayerText(name: string) {
+  return [`找不到付款人：${name}`, "", "請確認他是否已加入活動，", "或改用【我付】"].join(
+    "\n"
+  );
+}
+
+function getMissingParticipantText(name: string) {
+  return `找不到分攤成員：${name}`;
+}
+
+function parseBooleanChoice(text: string) {
+  const normalized = text.trim();
+
+  if (["是", "好", "可以", "要", "收", "接受", "有", "Y", "y", "yes", "Yes"].includes(normalized)) {
+    return true;
+  }
+
+  if (["否", "不要", "不收", "不接受", "沒有", "N", "n", "no", "No"].includes(normalized)) {
+    return false;
+  }
+
+  return null;
 }
 
 async function startAwaitingActivityName(input: {
@@ -254,280 +360,17 @@ async function startAwaitingActivityName(input: {
   return getAwaitingActivityNamePrompt();
 }
 
-async function startPaymentSetup(lineUserId: string, presetName?: string) {
-  const profile = await getOrCreateLineUserProfile(lineUserId);
-  const draft = defaultPaymentSetupDraft({
-    memberName: presetName ?? profile.memberName,
-    acceptBankTransfer: profile.acceptBankTransfer,
-    bankName: profile.bankName,
-    bankAccount: profile.bankAccount,
-    acceptLinePay: profile.acceptLinePay,
-    acceptCash: profile.acceptCash,
-    paymentNote: profile.paymentNote
-  });
-
-  if (!draft.memberName) {
-    await updateLineUserProfileDraft(
-      lineUserId,
-      PAYMENT_SETUP_STEPS.awaitingName,
-      draft
-    );
-
-    return ["先告訴小二你是誰。", "請輸入：我是你的名字"].join("\n");
-  }
-
-  await updateLineUserProfileDraft(
-    lineUserId,
-    PAYMENT_SETUP_STEPS.awaitingBankChoice,
-    draft
-  );
-
-  return ["先設定銀行匯款。", "你要收銀行轉帳嗎？請回：是 / 否"].join("\n");
-}
-
-async function finishPaymentSetup(lineUserId: string, draft: PaymentSetupDraft) {
-  await db.lineUserProfile.upsert({
-    where: {
-      lineUserId
-    },
-    update: {
-      memberName: draft.memberName,
-      acceptBankTransfer: draft.acceptBankTransfer,
-      bankName: draft.bankName,
-      bankAccount: draft.bankAccount,
-      acceptLinePay: draft.acceptLinePay,
-      acceptCash: draft.acceptCash,
-      paymentNote: draft.paymentNote,
-      setupState: null,
-      setupDraft: Prisma.JsonNull
-    },
-    create: {
-      lineUserId,
-      memberName: draft.memberName,
-      acceptBankTransfer: draft.acceptBankTransfer,
-      bankName: draft.bankName,
-      bankAccount: draft.bankAccount,
-      acceptLinePay: draft.acceptLinePay,
-      acceptCash: draft.acceptCash,
-      paymentNote: draft.paymentNote,
-      setupState: null,
-      setupDraft: Prisma.JsonNull
-    }
-  });
-
-  return formatPaymentSummary({
-    memberName: draft.memberName ?? "使用者",
-    acceptBankTransfer: draft.acceptBankTransfer,
-    bankName: draft.bankName,
-    bankAccount: draft.bankAccount,
-    acceptLinePay: draft.acceptLinePay,
-    acceptCash: draft.acceptCash,
-    paymentNote: draft.paymentNote
-  });
-}
-
-async function handlePaymentSetupResponse(lineUserId: string, text: string) {
-  const profile = await getOrCreateLineUserProfile(lineUserId);
-  const setupState = profile.setupState as PaymentSetupStep | null;
-
-  if (!setupState) {
-    return null;
-  }
-
-  const message = text.trim();
-  const draft = getCurrentPaymentDraft(profile);
-
-  switch (setupState) {
-    case PAYMENT_SETUP_STEPS.awaitingName: {
-      if (!message.startsWith("我是")) {
-        return "請輸入：我是你的名字";
-      }
-
-      draft.memberName = message.replace(/^我是/u, "").trim();
-      await updateLineUserProfileDraft(
-        lineUserId,
-        PAYMENT_SETUP_STEPS.awaitingBankChoice,
-        draft
-      );
-
-      return "你要收銀行轉帳嗎？請回：是 / 否";
-    }
-
-    case PAYMENT_SETUP_STEPS.awaitingBankChoice: {
-      const choice = parseBooleanChoice(message);
-      if (choice === null) {
-        return "請回：是 / 否";
-      }
-
-      draft.acceptBankTransfer = choice;
-
-      if (choice) {
-        await updateLineUserProfileDraft(
-          lineUserId,
-          PAYMENT_SETUP_STEPS.awaitingBankName,
-          draft
-        );
-
-        return "請輸入銀行名稱，例如：玉山銀行 808";
-      }
-
-      draft.bankName = null;
-      draft.bankAccount = null;
-      await updateLineUserProfileDraft(
-        lineUserId,
-        PAYMENT_SETUP_STEPS.awaitingLinePayChoice,
-        draft
-      );
-
-      return "你要收 LINE Pay 嗎？請回：是 / 否";
-    }
-
-    case PAYMENT_SETUP_STEPS.awaitingBankName: {
-      if (!message) {
-        return "請輸入銀行名稱，例如：玉山銀行 808";
-      }
-
-      draft.bankName = message;
-      await updateLineUserProfileDraft(
-        lineUserId,
-        PAYMENT_SETUP_STEPS.awaitingBankAccount,
-        draft
-      );
-
-      return "請輸入銀行帳號";
-    }
-
-    case PAYMENT_SETUP_STEPS.awaitingBankAccount: {
-      if (!message) {
-        return "請輸入銀行帳號";
-      }
-
-      draft.bankAccount = message;
-      await updateLineUserProfileDraft(
-        lineUserId,
-        PAYMENT_SETUP_STEPS.awaitingLinePayChoice,
-        draft
-      );
-
-      return "你要收 LINE Pay 嗎？請回：是 / 否";
-    }
-
-    case PAYMENT_SETUP_STEPS.awaitingLinePayChoice: {
-      const choice = parseBooleanChoice(message);
-      if (choice === null) {
-        return "請回：是 / 否";
-      }
-
-      draft.acceptLinePay = choice;
-      await updateLineUserProfileDraft(
-        lineUserId,
-        PAYMENT_SETUP_STEPS.awaitingCashChoice,
-        draft
-      );
-
-      return "你要收現金嗎？請回：是 / 否";
-    }
-
-    case PAYMENT_SETUP_STEPS.awaitingCashChoice: {
-      const choice = parseBooleanChoice(message);
-      if (choice === null) {
-        return "請回：是 / 否";
-      }
-
-      draft.acceptCash = choice;
-      await updateLineUserProfileDraft(
-        lineUserId,
-        PAYMENT_SETUP_STEPS.awaitingNote,
-        draft
-      );
-
-      return "有沒有付款備註？沒有的話請回：略過";
-    }
-
-    case PAYMENT_SETUP_STEPS.awaitingNote: {
-      draft.paymentNote = isSkipText(message) ? null : message;
-      return finishPaymentSetup(lineUserId, draft);
-    }
-
-    default:
-      return null;
-  }
-}
-
-async function resolveShortcutCommand(
-  event: LineMessageEvent,
-  number: number,
-  payload?: string
-): Promise<ParsedLineCommand> {
-  const { chatId, chatType, lineUserId } = getChatContext(event.source);
-  const context = await getActiveMenuContext(chatId, lineUserId);
-  const menuMode = resolveMenuModeFromContext(context);
-  const trimmedPayload = payload?.trim();
-
-  if (!menuMode) {
-    if (chatType === "user" && number === 3) {
-      return { kind: "start-payment-setup" };
-    }
-
-    return { kind: "menu-context-required" };
-  }
-
-  if (menuMode === "xiaoer") {
-    if (number === 1) {
-      return trimmedPayload
-        ? { kind: "create-ledger", name: trimmedPayload }
-        : { kind: "create-ledger-help" };
-    }
-
-    if (number === 2) {
-      return { kind: "confirm-members" };
-    }
-
-    if (number === 3) {
-      return { kind: "start-payment-setup" };
-    }
-
-    if (number === 4) {
-      return { kind: "expense-help" };
-    }
-
-    if (number === 5) {
-      return { kind: "recent-expenses" };
-    }
-
-    if (number === 6) {
-      return { kind: "delete-last-expense" };
-    }
-  }
-
-  if (menuMode === "settlement") {
-    if (number === 1) {
-      return { kind: "settlement" };
-    }
-
-    if (number === 2) {
-      return { kind: "mvp" };
-    }
-
-    if (number === 3) {
-      return { kind: "close-ledger" };
-    }
-
-    if (number === 4) {
-      return { kind: "list-archived-ledgers" };
-    }
-  }
-
-  return { kind: "ignored" };
-}
-
 async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+  const { chatId, lineUserId, chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
-  const { chatId, lineUserId } = getChatContext(event.source);
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
 
   if (lineUserId) {
     await clearPendingAction({
@@ -537,8 +380,8 @@ async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) 
     });
   }
 
-  const displayName = await resolveActorDisplayName(event, required.context);
-  const result = await createLedgerForGroup(required.context.group.id, name, {
+  const displayName = await resolveActorDisplayName(event);
+  const result = await createLedgerForGroup(binding.group.id, name, {
     lineUserId,
     displayName
   });
@@ -546,19 +389,17 @@ async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) 
   await rememberMenuContext({
     chatId,
     lineUserId,
-    groupId: required.context.group.id,
+    groupId: binding.group.id,
     mode: "xiaoer"
   });
 
-  const activeParticipants = await getActiveLedgerParticipants(required.context.group.id);
-  const memberNames = activeParticipants.participants.map(
-    (participant) => participant.displayName
-  );
+  const activeParticipants = await getActiveLedgerParticipants(binding.group.id);
+  const memberNames = activeParticipants.participants.map((participant) => participant.displayName);
 
   if (result.previousActiveName) {
     return withQuickReply(
       [
-        `已建立活動：${result.ledger.name}，並設為目前帳本`,
+        `已建立活動：${result.ledger.name}，並設為目前活動`,
         `上一個活動 ${result.previousActiveName} 已自動結束`,
         getCollectingMembersPrompt(result.ledger.name, memberNames)
       ].join("\n\n"),
@@ -573,7 +414,11 @@ async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) 
 }
 
 async function handleCreateLedgerFromPending(event: LineMessageEvent, name: string) {
-  const { chatId, lineUserId } = getChatContext(event.source);
+  const { chatId, lineUserId, chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
 
   if (!lineUserId) {
     return getMissingLineIdentityMessage();
@@ -606,22 +451,28 @@ async function handleJoinOrLeaveWithRoster(
   event: LineMessageEvent,
   action: "join" | "leave"
 ) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
   }
 
   const { lineUserId } = getChatContext(event.source);
-  const displayName = await resolveActorDisplayName(event, required.context);
+  const displayName = await resolveActorDisplayName(event);
   const result =
     action === "join"
       ? await joinCollectingLedger({
-          groupId: required.context.group.id,
+          groupId: binding.group.id,
           lineUserId,
           displayName
         })
       : await leaveCollectingLedger({
-          groupId: required.context.group.id,
+          groupId: binding.group.id,
           lineUserId,
           displayName
         });
@@ -658,27 +509,28 @@ async function handleJoinOrLeaveWithRoster(
 }
 
 async function handleConfirmMembers(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
-  const { lineUserId } = getChatContext(event.source);
-  const activeLedger = await getActiveLedger(required.context.group.id);
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const activeLedger = await getActiveLedger(binding.group.id);
 
   if (!activeLedger) {
     return getNoActiveLedgerText();
   }
 
-  if (
-    activeLedger.creatorLineUserId &&
-    lineUserId &&
-    activeLedger.creatorLineUserId !== lineUserId
-  ) {
+  if (activeLedger.creatorLineUserId && lineUserId && activeLedger.creatorLineUserId !== lineUserId) {
     return "只有本次活動建立者可以確認成員";
   }
 
-  const result = await confirmCollectingLedger(required.context.group.id);
+  const result = await confirmCollectingLedger(binding.group.id);
 
   if (result.status === "no-ledger") {
     return getNoActiveLedgerText();
@@ -705,12 +557,18 @@ async function handleConfirmMembers(event: LineMessageEvent) {
 }
 
 async function handleListMembers(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
-  const active = await getActiveLedgerParticipants(required.context.group.id);
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const active = await getActiveLedgerParticipants(binding.group.id);
 
   if (!active.ledger) {
     return getNoActiveLedgerText();
@@ -726,189 +584,131 @@ async function handleListMembers(event: LineMessageEvent) {
   ].join("\n");
 }
 
-async function resolvePayerMember(input: {
-  group: GroupContext["group"];
-  lineUserId?: string;
-  displayName: string;
-  payerName?: string;
-  payerIsSender?: boolean;
-}) {
-  if (input.payerIsSender) {
-    if (input.lineUserId) {
-      const byLineUserId = input.group.members.find(
-        (member) => member.lineUserId === input.lineUserId
-      );
+async function handleCurrentLedger(event: LineMessageEvent) {
+  const { chatType } = getChatContext(event.source);
 
-      if (byLineUserId) {
-        return byLineUserId;
-      }
-    }
-
-    return input.group.members.find((member) => member.name === input.displayName) ?? null;
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
-  if (input.payerName) {
-    return input.group.members.find((member) => member.name === input.payerName) ?? null;
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
   }
 
-  return null;
-}
-
-async function handleExpenseCommand(
-  event: LineMessageEvent,
-  command: Extract<ParsedLineCommand, { kind: "expense" }>
-) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
-  }
-
-  const { lineUserId } = getChatContext(event.source);
-  const actorDisplayName = await resolveActorDisplayName(event, required.context);
-  const confirmed = await getConfirmedMemberIdsForActiveLedger(required.context.group.id);
-
-  if (!confirmed.ledger) {
-    return getNoActiveLedgerText();
-  }
-
-  if (confirmed.ledger.isCollectingMembers) {
-    return "成員還沒確認完成，請先確認成員再記帳。";
-  }
-
-  if (confirmed.memberIds.length === 0) {
-    return "目前活動沒有已確認的成員，請先確認成員再記帳。";
-  }
-
-  const payer = await resolvePayerMember({
-    group: required.context.group,
-    lineUserId,
-    displayName: actorDisplayName,
-    payerName: command.payerName,
-    payerIsSender: command.payerIsSender ?? !command.payerName
-  });
-
-  if (!payer) {
-    return "找不到付款人，請用比較清楚的寫法，例如：晚餐 2000 阿豪付。";
-  }
-
-  const participantIds = confirmed.memberIds;
-
-  if (command.participantCount && command.participantCount !== confirmed.memberIds.length) {
-    return `你寫了 ${command.participantCount} 人分，但目前已確認成員有 ${confirmed.memberIds.length} 位，請補充更明確的分攤對象。`;
-  }
-
-  const result = await createExpenseInGroup({
-    groupId: required.context.group.id,
-    title: command.title,
-    amount: command.amount,
-    payerId: payer.id,
-    participantIds,
-    notes: "由 LINE Bot 建立"
-  });
-
-  const settlement = await calculateSettlement(result.ledger.id);
-  const settlementLines =
-    settlement?.lines.length && settlement.lines[0] !== "目前已經結清，不用再轉帳。"
-      ? settlement.lines
-      : ["目前已經結清，不用再轉帳。"];
-
-  return [
-    `已新增支出：${result.expense.title}`,
-    `金額：NT$ ${result.expense.amountDisplay}`,
-    `付款人：${result.expense.payer.name}`,
-    `分攤人數：${result.expense.participants.length} 人`,
-    `每人：NT$ ${formatCents(
-      result.expense.participants[0]?.shareCents ?? result.expense.amountCents
-    )}`,
-    "",
-    `目前活動：${result.ledger.name}`,
-    ...settlementLines
-  ].join("\n");
-}
-
-async function handleRecentExpenses(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
-  }
-
-  const result = await getRecentExpenses(required.context.group.id, 5);
-
-  if (!result.activeLedger) {
-    return getNoActiveLedgerText();
-  }
-
-  if (result.expenses.length === 0) {
-    return withQuickReply(
-      [`目前活動：${result.activeLedger.name}`, "目前還沒有支出紀錄"].join("\n"),
-      buildExpenseQuickReply()
-    );
-  }
-
-  return withQuickReply(
-    [
-      `目前活動：${result.activeLedger.name}`,
-      `目前消費總額：NT$ ${formatCents(result.totalExpenseCents)}`,
-      "最近支出：",
-      ...result.expenses.map(formatExpenseLine)
-    ].join("\n"),
-    buildExpenseQuickReply()
-  );
-}
-
-async function handleDeleteLastExpense(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
-  }
-
-  const activeLedger = await getActiveLedger(required.context.group.id);
+  const activeLedger = await getActiveLedger(binding.group.id);
 
   if (!activeLedger) {
     return getNoActiveLedgerText();
   }
 
-  const latestExpense = await db.expense.findFirst({
-    where: {
-      ledgerId: activeLedger.id
-    },
-    orderBy: {
-      createdAt: "desc"
-    }
-  });
+  return `目前活動：${activeLedger.name}`;
+}
 
-  if (!latestExpense) {
-    return `目前活動 ${activeLedger.name} 還沒有可刪除的紀錄。`;
+async function handleResetLedger(event: LineMessageEvent) {
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
-  await db.expense.delete({
-    where: {
-      id: latestExpense.id
-    }
-  });
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
 
-  const settlement = await calculateSettlement(activeLedger.id);
-  const settlementLines =
-    settlement?.lines.length && settlement.lines[0] !== "目前已經結清，不用再轉帳。"
-      ? settlement.lines
-      : ["目前已經結清，不用再轉帳。"];
+  const closed = await closeActiveLedger(binding.group.id);
+
+  if (!closed) {
+    return getNoActiveLedgerText();
+  }
+
+  return `已結束目前活動：${closed.name}`;
+}
+
+async function handleGroupInfo(event: LineMessageEvent) {
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const summary = await getGroupInfoSummary(binding.group.id);
+
+  if (!summary) {
+    return getMissingGroupContextMessage();
+  }
 
   return [
-    `已刪除：${latestExpense.title}`,
-    `金額：NT$ ${formatSpeechAmount(latestExpense.amountCents)}`,
-    "",
-    `目前活動：${activeLedger.name}`,
-    ...settlementLines
+    `群組：${summary.name}`,
+    `建立時間：${summary.createdAt.toLocaleString("zh-TW")}`,
+    summary.activeLedgerName ? `目前活動：${summary.activeLedgerName}` : "目前活動：沒有"
   ].join("\n");
 }
 
-async function handleSettlement(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+async function handleSwitchLedger(event: LineMessageEvent, name: string) {
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
-  const snapshot = await getSettlementSnapshot(required.context.group.id);
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  try {
+    const result = await switchActiveLedger(binding.group.id, name);
+
+    return result.previousActiveName
+      ? `已切換到活動：${result.ledger.name}\n上一個活動：${result.previousActiveName}`
+      : `已切換到活動：${result.ledger.name}`;
+  } catch (error) {
+    return error instanceof Error ? error.message : "切換活動時發生錯誤。";
+  }
+}
+
+async function handleListLedgers(event: LineMessageEvent) {
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const ledgers = await listLedgers(binding.group.id);
+  return getLedgerListText(
+    ledgers.map((ledger) => ({
+      name: ledger.name,
+      isActive: ledger.isActive,
+      status: ledger.status
+    }))
+  );
+}
+
+async function handleSettlement(event: LineMessageEvent) {
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const snapshot = await getSettlementSnapshot(binding.group.id);
 
   if (!snapshot?.activeLedger) {
     return getNoActiveLedgerText();
@@ -925,12 +725,18 @@ async function handleSettlement(event: LineMessageEvent) {
 }
 
 async function handleMvp(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
-  const snapshot = await getActiveLedgerExpenseMvp(required.context.group.id);
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const snapshot = await getActiveLedgerExpenseMvp(binding.group.id);
 
   if (!snapshot?.activeLedger) {
     return getNoActiveLedgerText();
@@ -954,50 +760,19 @@ async function handleMvp(event: LineMessageEvent) {
   );
 }
 
-async function handleArchivePrompt(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
-  }
-
-  const { chatId, lineUserId } = getChatContext(event.source);
-
-  if (!lineUserId) {
-    return getMissingLineIdentityMessage();
-  }
-
-  const activeLedger = await getActiveLedger(required.context.group.id);
-
-  if (!activeLedger) {
-    return getNoActiveLedgerText();
-  }
-
-  if (activeLedger.creatorLineUserId && activeLedger.creatorLineUserId !== lineUserId) {
-    return "只有活動建立者可以結束並封存活動。";
-  }
-
-  await createPendingAction({
-    groupId: required.context.group.id,
-    chatId,
-    requesterLineUserId: lineUserId,
-    actionType: PendingActionType.archive_active_ledger,
-    targetLedgerId: activeLedger.id
-  });
-
-  return [
-    "提醒大人：請先確認本次費用是否都已結清。",
-    "確定要結束並封存這次活動嗎？",
-    "請回覆：是 或 否"
-  ].join("\n");
-}
-
 async function handleArchivedLedgers(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
-  const ledgers = await getArchivedLedgerSnapshots(required.context.group.id, 5);
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const ledgers = await getArchivedLedgerSnapshots(binding.group.id, 5);
 
   if (ledgers.length === 0) {
     return withQuickReply("目前沒有封存帳本。", buildArchivedLedgerQuickReply());
@@ -1023,83 +798,498 @@ async function handleArchivedLedgers(event: LineMessageEvent) {
   );
 }
 
-async function handleCurrentLedger(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+function resolvePayerParticipant(input: {
+  participants: ConfirmedParticipantRef[];
+  actorDisplayName: string;
+  payerName?: string | null;
+  payerIsSender?: boolean;
+  lineUserId?: string;
+}) {
+  if (input.payerIsSender || !input.payerName) {
+    const byLineUserId = input.lineUserId
+      ? input.participants.find((participant) => participant.lineUserId === input.lineUserId)
+      : null;
+
+    if (byLineUserId) {
+      return byLineUserId;
+    }
+
+    const byDisplayName = findParticipantByName(input.participants, input.actorDisplayName);
+    if (byDisplayName) {
+      return byDisplayName;
+    }
+
+    return null;
   }
 
-  const activeLedger = await getActiveLedger(required.context.group.id);
-  return activeLedger
-    ? `目前活動：${activeLedger.name}`
-    : getNoActiveLedgerText();
+  return findParticipantByName(input.participants, input.payerName);
 }
 
-async function handleSwitchLedger(event: LineMessageEvent, name: string) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+function resolveCustomShares(input: {
+  participants: ConfirmedParticipantRef[];
+  shares: Array<{ participantName: string; amount: string }>;
+}) {
+  const resolved: Array<{ memberId: string; memberName: string; shareCents: number }> = [];
+
+  for (const share of input.shares) {
+    const participant = findParticipantByName(input.participants, share.participantName);
+
+    if (!participant) {
+      return {
+        ok: false as const,
+        missingParticipantName: share.participantName
+      };
+    }
+
+    resolved.push({
+      memberId: participant.memberId,
+      memberName: participant.displayName,
+      shareCents: parseAmountToCents(share.amount)
+    });
   }
 
-  const result = await switchActiveLedger(required.context.group.id, name);
-  return result.previousActiveName
-    ? `已切換到活動：${result.ledger.name}\n上一個活動 ${result.previousActiveName} 已自動關閉`
-    : `已切換到活動：${result.ledger.name}`;
+  return {
+    ok: true as const,
+    shares: resolved
+  };
 }
 
-async function handleListLedgers(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+async function finalizeEqualExpense(input: {
+  event: LineMessageEvent;
+  title: string;
+  amount: string;
+  payerName?: string;
+  payerIsSender?: boolean;
+}) {
+  const { chatType, lineUserId } = getChatContext(input.event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
-  const ledgers = await listLedgers(required.context.group.id);
-  return getLedgerListText(ledgers);
-}
-
-async function handleResetLedger(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+  const binding = await getOrCreateGroupContext(input.event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
   }
 
-  const closed = await closeActiveLedger(required.context.group.id);
-  return closed ? `已重置活動：${closed.name}` : getNoActiveLedgerText();
-}
+  const confirmed = await getConfirmedMemberIdsForActiveLedger(binding.group.id);
 
-async function handleGroupInfo(event: LineMessageEvent) {
-  const required = await requireGroupContext(event);
-  if (!required.ok) {
-    return required.message;
+  if (!confirmed.ledger) {
+    return getNoActiveLedgerText();
   }
 
-  const info = await getGroupInfoSummary(required.context.group.id);
-
-  if (!info) {
-    return getGroupContextUnavailableMessage();
+  if (confirmed.ledger.isCollectingMembers) {
+    return getExpenseNotAllowedText();
   }
+
+  const actorDisplayName = await resolveActorDisplayName(input.event);
+  const payer = resolvePayerParticipant({
+    participants: confirmed.participants,
+    actorDisplayName,
+    payerName: input.payerName,
+    payerIsSender: input.payerIsSender,
+    lineUserId
+  });
+
+  if (!payer) {
+    return getMissingPayerText(input.payerName ?? actorDisplayName);
+  }
+
+  const created = await createExpenseInGroup({
+    groupId: binding.group.id,
+    title: input.title,
+    amount: input.amount,
+    payerId: payer.memberId,
+    participantIds: confirmed.memberIds
+  });
+
+  const amountCents = parseAmountToCents(input.amount);
+  const shareCents = Math.round(amountCents / confirmed.memberIds.length);
+  const snapshot = await getSettlementSnapshot(binding.group.id);
+
+  const settlementLines =
+    snapshot?.summary.settlement.map(
+      (item) => `${item.fromName} → ${item.toName} ${item.amountDisplay}`
+    ) ?? ["目前已經結清，不用再轉帳了。"];
 
   return [
-    `群組名稱：${info.name}`,
-    `群組狀態：${info.status}`,
-    `LINE 群組 ID：${info.lineGroupId ?? "無"}`,
-    `建立時間：${info.createdAt.toLocaleString("zh-TW", { hour12: false })}`,
-    `目前活動：${info.activeLedgerName ?? "尚未建立活動"}`
+    `已新增支出：${input.title} ${formatAmountForDisplay(amountCents)}`,
+    "",
+    `付款人：${payer.displayName}`,
+    `平均分攤：${confirmed.memberIds.length}人，每人${formatAmountForDisplay(shareCents)}`,
+    "",
+    buildSettlementBlock(settlementLines)
   ].join("\n");
 }
 
-async function handlePendingConfirmation(
-  event: LineMessageEvent,
-  confirmed: boolean
-) {
-  const { chatId, lineUserId, chatType } = getChatContext(event.source);
+async function finalizeCustomExpense(input: {
+  event: LineMessageEvent;
+  draft: PendingExpenseDraft;
+}) {
+  const { chatType, lineUserId } = getChatContext(input.event.source);
 
   if (chatType === "user") {
-    return "目前沒有需要確認的群組操作。";
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(input.event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const confirmed = await getConfirmedMemberIdsForActiveLedger(binding.group.id);
+
+  if (!confirmed.ledger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (confirmed.ledger.isCollectingMembers) {
+    return getExpenseNotAllowedText();
+  }
+
+  const actorDisplayName = await resolveActorDisplayName(input.event);
+  const payer = resolvePayerParticipant({
+    participants: confirmed.participants,
+    actorDisplayName,
+    payerName: input.draft.payerName,
+    payerIsSender: input.draft.payerIsSender,
+    lineUserId
+  });
+
+  if (!payer) {
+    return getMissingPayerText(input.draft.payerName ?? actorDisplayName);
+  }
+
+  const resolvedShares = resolveCustomShares({
+    participants: confirmed.participants,
+    shares: input.draft.shares
+  });
+
+  if (!resolvedShares.ok) {
+    return getMissingParticipantText(resolvedShares.missingParticipantName);
+  }
+
+  const totalCents = parseAmountToCents(input.draft.amount);
+  const shareTotalCents = resolvedShares.shares.reduce((sum, share) => sum + share.shareCents, 0);
+
+  if (shareTotalCents !== totalCents) {
+    return buildExpenseMismatchText(totalCents, shareTotalCents);
+  }
+
+  await createExpenseInGroup({
+    groupId: binding.group.id,
+    title: input.draft.title,
+    amount: input.draft.amount,
+    payerId: payer.memberId,
+    participantShares: resolvedShares.shares.map((share) => ({
+      memberId: share.memberId,
+      shareCents: share.shareCents
+    }))
+  });
+
+  const snapshot = await getSettlementSnapshot(binding.group.id);
+  const settlementLines =
+    snapshot?.summary.settlement.map(
+      (item) => `${item.fromName} → ${item.toName} ${item.amountDisplay}`
+    ) ?? ["目前已經結清，不用再轉帳了。"];
+
+  return [
+    `已新增支出：${input.draft.title} ${formatAmountForDisplay(totalCents)}`,
+    "",
+    `付款人：${payer.displayName}`,
+    ...resolvedShares.shares.map(
+      (share) => `${share.memberName}：${formatAmountForDisplay(share.shareCents)}`
+    ),
+    "",
+    buildSettlementBlock(settlementLines)
+  ].join("\n");
+}
+
+async function handleImmediateMultilineExpense(event: LineMessageEvent) {
+  const lines = splitMultilineSegments(event.message.text);
+
+  if (lines.length < 3) {
+    return null;
+  }
+
+  const header = parseExpenseDraftHeader(lines[0]);
+  const payerLine = parseExpensePayerLine(lines[1]);
+
+  if (!header || !payerLine) {
+    return null;
+  }
+
+  const shares = lines.slice(2).map(parseExpenseShareLine);
+  if (shares.some((share) => !share)) {
+    return null;
+  }
+
+  return finalizeCustomExpense({
+    event,
+    draft: {
+      title: header.title,
+      amount: header.amount,
+      payerName: payerLine.payerName,
+      payerIsSender: payerLine.payerIsSender,
+      shares: shares.filter(
+        (
+          share
+        ): share is {
+          participantName: string;
+          amount: string;
+        } => Boolean(share)
+      )
+    }
+  });
+}
+
+async function handleExpenseDraftStart(event: LineMessageEvent) {
+  const { chatType, chatId, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
   }
 
   if (!lineUserId) {
     return getMissingLineIdentityMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const confirmed = await getConfirmedMemberIdsForActiveLedger(binding.group.id);
+  if (!confirmed.ledger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (confirmed.ledger.isCollectingMembers) {
+    return getExpenseNotAllowedText();
+  }
+
+  const header = parseExpenseDraftHeader(event.message.text.trim());
+  if (!header) {
+    return null;
+  }
+
+  await createPendingAction({
+    groupId: binding.group.id,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: AWAITING_EXPENSE_DETAILS_ACTION,
+    payload: serializeExpenseDraftPayload(buildExpenseDraft(header.title, header.amount)),
+    ttlMinutes: 5
+  });
+
+  return `已記下：${header.title} ${header.amount}\n請再輸入付款人，例如：周永豪付`;
+}
+
+async function handleExpenseDraftContinuation(
+  event: LineMessageEvent,
+  pending: Awaited<ReturnType<typeof getPendingActionState>>["pending"]
+) {
+  const { chatId, lineUserId, chatType } = getChatContext(event.source);
+
+  if (!pending || !lineUserId || chatType === "user") {
+    return getAwaitingExpenseExpiredPrompt();
+  }
+
+  const draft = parseExpenseDraftPayload(pending.payload);
+  if (!draft) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: AWAITING_EXPENSE_DETAILS_ACTION
+    });
+    return getAwaitingExpenseExpiredPrompt();
+  }
+
+  const updatedDraft: PendingExpenseDraft = {
+    ...draft,
+    shares: [...draft.shares]
+  };
+
+  const lines = splitMultilineSegments(event.message.text);
+  let changed = false;
+
+  for (const line of lines) {
+    const payer = parseExpensePayerLine(line);
+    if (payer) {
+      updatedDraft.payerName = payer.payerName;
+      updatedDraft.payerIsSender = payer.payerIsSender;
+      changed = true;
+      continue;
+    }
+
+    const share = parseExpenseShareLine(line);
+    if (share) {
+      updatedDraft.shares.push(share);
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return "看不懂這段支出細項，請改成像「周永豪付」或「100陳彥廷」這樣的格式。";
+  }
+
+  const totalCents = parseAmountToCents(updatedDraft.amount);
+  const shareTotalCents = updatedDraft.shares.reduce(
+    (sum, share) => sum + parseAmountToCents(share.amount),
+    0
+  );
+
+  if (shareTotalCents > totalCents) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: AWAITING_EXPENSE_DETAILS_ACTION
+    });
+    return buildExpenseMismatchText(totalCents, shareTotalCents);
+  }
+
+  if (updatedDraft.payerName && shareTotalCents === totalCents) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: AWAITING_EXPENSE_DETAILS_ACTION
+    });
+    return finalizeCustomExpense({
+      event,
+      draft: updatedDraft
+    });
+  }
+
+  await createPendingAction({
+    groupId: pending.groupId,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: AWAITING_EXPENSE_DETAILS_ACTION,
+    payload: serializeExpenseDraftPayload(updatedDraft),
+    ttlMinutes: 5
+  });
+
+  if (!updatedDraft.payerName) {
+    return `已記下：${updatedDraft.title} ${updatedDraft.amount}\n請再輸入付款人，例如：周永豪付`;
+  }
+
+  return `目前細項加總：${formatAmountForDisplay(shareTotalCents)} / ${formatAmountForDisplay(totalCents)}\n請繼續輸入下一位，例如：50張祥豪`;
+}
+
+async function handleRecentExpenses(event: LineMessageEvent) {
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const result = await getRecentExpenses(binding.group.id, 5);
+
+  if (!result.activeLedger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (result.expenses.length === 0) {
+    return withQuickReply(
+      [`目前活動：${result.activeLedger.name}`, "目前還沒有支出紀錄"].join("\n"),
+      buildExpenseQuickReply()
+    );
+  }
+
+  return withQuickReply(
+    [
+      `目前活動：${result.activeLedger.name}`,
+      `目前消費總額：NT$ ${formatCents(result.totalExpenseCents)}`,
+      "最近支出：",
+      ...result.expenses.map(formatExpenseLine)
+    ].join("\n\n"),
+    buildExpenseQuickReply()
+  );
+}
+
+async function handleDeleteLastExpense(event: LineMessageEvent) {
+  const { chatType, chatId, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  if (!lineUserId) {
+    return getMissingLineIdentityMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const result = await getRecentExpenses(binding.group.id, 1);
+  const latestExpense = result.expenses[0];
+
+  if (!latestExpense) {
+    return "目前沒有可刪除的紀錄";
+  }
+
+  await createPendingAction({
+    groupId: binding.group.id,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.delete_recent_expense,
+    targetExpenseId: latestExpense.id,
+    ttlMinutes: 5
+  });
+
+  return "確定要刪除上一筆支出嗎？請回覆 是 或 否";
+}
+
+async function handleArchivePrompt(event: LineMessageEvent) {
+  const { chatType, chatId, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  if (!lineUserId) {
+    return getMissingLineIdentityMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const activeLedger = await getActiveLedger(binding.group.id);
+
+  if (!activeLedger) {
+    return getNoActiveLedgerText();
+  }
+
+  await createPendingAction({
+    groupId: binding.group.id,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.archive_active_ledger,
+    targetLedgerId: activeLedger.id,
+    ttlMinutes: 5
+  });
+
+  return [
+    "提醒大人：請先確認本次費用是否都已結清。",
+    "確定要結束並封存這次活動嗎？",
+    "請回覆 是 或 否"
+  ].join("\n");
+}
+
+async function handlePendingConfirmation(event: LineMessageEvent, confirmed: boolean) {
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user" || !lineUserId) {
+    return confirmed ? null : null;
   }
 
   const pending = await getPendingAction({
@@ -1108,7 +1298,7 @@ async function handlePendingConfirmation(
   });
 
   if (!pending) {
-    return "目前沒有等待你確認的操作。";
+    return null;
   }
 
   await clearPendingAction({
@@ -1117,60 +1307,292 @@ async function handlePendingConfirmation(
   });
 
   if (!confirmed) {
-    if (pending.actionType === AWAITING_ACTIVITY_NAME_ACTION) {
-      return "已取消建立活動";
+    if (pending.actionType === PendingActionType.delete_recent_expense) {
+      return "已取消刪除上一筆支出";
     }
 
-    return "已取消操作";
-  }
-
-  if (pending.actionType === PendingActionType.archive_active_ledger) {
-    const archived = pending.targetLedgerId
-      ? await archiveActiveLedger(pending.groupId)
-      : null;
-
-    if (!archived) {
-      return "找不到要封存的活動。";
+    if (pending.actionType === PendingActionType.archive_active_ledger) {
+      return "已取消封存活動";
     }
 
-    return `已封存活動：${archived.name}`;
+    return null;
   }
 
   if (pending.actionType === PendingActionType.delete_recent_expense) {
     if (!pending.targetExpenseId) {
-      return "找不到要刪除的支出。";
+      return "目前沒有可刪除的紀錄";
     }
 
     const expense = await db.expense.findUnique({
-      where: {
-        id: pending.targetExpenseId
+      where: { id: pending.targetExpenseId },
+      include: {
+        participants: true
       }
     });
 
     if (!expense) {
-      return "找不到要刪除的支出。";
+      return "目前沒有可刪除的紀錄";
     }
 
     await db.expense.delete({
-      where: {
-        id: expense.id
+      where: { id: expense.id }
+    });
+
+    const snapshot = await getSettlementSnapshot(pending.groupId);
+    const settlementLines =
+      snapshot?.summary.settlement.map(
+        (item) => `${item.fromName} → ${item.toName} ${item.amountDisplay}`
+      ) ?? ["目前已經結清，不用再轉帳了。"];
+
+    return [
+      `已刪除：${expense.title} ${formatAmountForDisplay(expense.amountCents)}`,
+      "",
+      buildSettlementBlock(settlementLines)
+    ].join("\n");
+  }
+
+  if (pending.actionType === PendingActionType.archive_active_ledger) {
+    const activeLedger = await getActiveLedger(pending.groupId);
+
+    if (!activeLedger) {
+      return getNoActiveLedgerText();
+    }
+
+    if (activeLedger.creatorLineUserId && activeLedger.creatorLineUserId !== lineUserId) {
+      return "只有本次活動建立者可以確認封存";
+    }
+
+    const archived = await archiveActiveLedger(pending.groupId);
+
+    if (!archived) {
+      return getNoActiveLedgerText();
+    }
+
+    return `已結束並封存活動：${archived.name}`;
+  }
+
+  return null;
+}
+
+async function handlePaymentSetupResponse(lineUserId: string, text: string) {
+  const profile = await getOrCreateLineUserProfile(lineUserId);
+  const step = profile.setupState as PaymentSetupStep | null;
+
+  if (!step) {
+    return null;
+  }
+
+  const normalized = text.trim();
+  const draft = getCurrentPaymentDraft(profile);
+
+  if (normalized === "取消" || normalized === "不用了") {
+    await updateLineUserProfileDraft(lineUserId, null, null);
+    return "已取消設定收款方式";
+  }
+
+  if (step === PAYMENT_SETUP_STEPS.awaitingName) {
+    const nextDraft = defaultPaymentSetupDraft({
+      ...draft,
+      memberName: normalized
+    });
+    await updateLineUserProfileDraft(
+      lineUserId,
+      PAYMENT_SETUP_STEPS.awaitingBankChoice,
+      nextDraft
+    );
+    return "要開啟銀行匯款嗎？請回覆 是 或 否";
+  }
+
+  if (step === PAYMENT_SETUP_STEPS.awaitingBankChoice) {
+    const answer = parseBooleanChoice(normalized);
+    if (answer === null) {
+      return "請回覆 是 或 否";
+    }
+
+    const nextDraft = defaultPaymentSetupDraft({
+      ...draft,
+      acceptBankTransfer: answer,
+      bankName: answer ? draft.bankName : null,
+      bankAccount: answer ? draft.bankAccount : null
+    });
+
+    await updateLineUserProfileDraft(
+      lineUserId,
+      answer ? PAYMENT_SETUP_STEPS.awaitingBankName : PAYMENT_SETUP_STEPS.awaitingLinePayChoice,
+      nextDraft
+    );
+
+    return answer ? "請輸入銀行名稱，例如：玉山銀行" : "要開啟 LINE Pay 嗎？請回覆 是 或 否";
+  }
+
+  if (step === PAYMENT_SETUP_STEPS.awaitingBankName) {
+    const nextDraft = defaultPaymentSetupDraft({
+      ...draft,
+      bankName: normalized
+    });
+    await updateLineUserProfileDraft(
+      lineUserId,
+      PAYMENT_SETUP_STEPS.awaitingBankAccount,
+      nextDraft
+    );
+    return "請輸入銀行帳號";
+  }
+
+  if (step === PAYMENT_SETUP_STEPS.awaitingBankAccount) {
+    const nextDraft = defaultPaymentSetupDraft({
+      ...draft,
+      bankAccount: normalized
+    });
+    await updateLineUserProfileDraft(
+      lineUserId,
+      PAYMENT_SETUP_STEPS.awaitingLinePayChoice,
+      nextDraft
+    );
+    return "要開啟 LINE Pay 嗎？請回覆 是 或 否";
+  }
+
+  if (step === PAYMENT_SETUP_STEPS.awaitingLinePayChoice) {
+    const answer = parseBooleanChoice(normalized);
+    if (answer === null) {
+      return "請回覆 是 或 否";
+    }
+
+    const nextDraft = defaultPaymentSetupDraft({
+      ...draft,
+      acceptLinePay: answer
+    });
+    await updateLineUserProfileDraft(
+      lineUserId,
+      PAYMENT_SETUP_STEPS.awaitingCashChoice,
+      nextDraft
+    );
+    return "現金可以收嗎？請回覆 是 或 否";
+  }
+
+  if (step === PAYMENT_SETUP_STEPS.awaitingCashChoice) {
+    const answer = parseBooleanChoice(normalized);
+    if (answer === null) {
+      return "請回覆 是 或 否";
+    }
+
+    const nextDraft = defaultPaymentSetupDraft({
+      ...draft,
+      acceptCash: answer
+    });
+    await updateLineUserProfileDraft(
+      lineUserId,
+      PAYMENT_SETUP_STEPS.awaitingNote,
+      nextDraft
+    );
+    return "如果有備註請直接輸入，沒有的話請回覆 略過";
+  }
+
+  if (step === PAYMENT_SETUP_STEPS.awaitingNote) {
+    const paymentNote = normalized === "略過" ? null : normalized;
+    const finalDraft = defaultPaymentSetupDraft({
+      ...draft,
+      paymentNote
+    });
+
+    await db.lineUserProfile.update({
+      where: { lineUserId },
+      data: {
+        memberName: finalDraft.memberName,
+        acceptBankTransfer: finalDraft.acceptBankTransfer,
+        bankName: finalDraft.bankName,
+        bankAccount: finalDraft.bankAccount,
+        acceptLinePay: finalDraft.acceptLinePay,
+        acceptCash: finalDraft.acceptCash,
+        paymentNote: finalDraft.paymentNote,
+        setupState: null,
+        setupDraft: Prisma.JsonNull
       }
     });
 
-    return `已刪除一筆 ${formatSpeechAmount(expense.amountCents)} 元的支出`;
+    return formatPaymentSummary({
+      memberName: finalDraft.memberName ?? "你",
+      acceptBankTransfer: finalDraft.acceptBankTransfer,
+      bankName: finalDraft.bankName,
+      bankAccount: finalDraft.bankAccount,
+      acceptLinePay: finalDraft.acceptLinePay,
+      acceptCash: finalDraft.acceptCash,
+      paymentNote: finalDraft.paymentNote
+    });
   }
 
-  if (pending.actionType === AWAITING_ACTIVITY_NAME_ACTION) {
-    return getAwaitingActivityNamePrompt();
-  }
-
-  return "目前沒有等待你確認的操作。";
+  return null;
 }
 
-async function handleResolvedCommand(
+async function resolveShortcutCommand(
   event: LineMessageEvent,
-  command: ParsedLineCommand
-): Promise<LineTextReplyPayload | null> {
+  number: number,
+  payload?: string
+): Promise<ParsedLineCommand> {
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
+  const context = await getActiveMenuContext(chatId, lineUserId);
+  const menuMode = resolveMenuModeFromContext(context);
+  const trimmedPayload = payload?.trim();
+
+  if (!menuMode) {
+    if (chatType === "user" && number === 4) {
+      return { kind: "start-payment-setup" };
+    }
+
+    return { kind: "menu-context-required" };
+  }
+
+  if (menuMode === "xiaoer") {
+    if (number === 1) {
+      return trimmedPayload ? { kind: "create-ledger", name: trimmedPayload } : { kind: "create-ledger-help" };
+    }
+
+    if (number === 2) {
+      return { kind: "join-activity" };
+    }
+
+    if (number === 3) {
+      return { kind: "confirm-members" };
+    }
+
+    if (number === 4) {
+      return { kind: "start-payment-setup" };
+    }
+
+    if (number === 5) {
+      return { kind: "expense-help" };
+    }
+
+    if (number === 6) {
+      return { kind: "recent-expenses" };
+    }
+
+    if (number === 7) {
+      return { kind: "delete-last-expense" };
+    }
+  }
+
+  if (menuMode === "settlement") {
+    if (number === 1) {
+      return { kind: "settlement" };
+    }
+
+    if (number === 2) {
+      return { kind: "mvp" };
+    }
+
+    if (number === 3) {
+      return { kind: "close-ledger" };
+    }
+
+    if (number === 4) {
+      return { kind: "list-archived-ledgers" };
+    }
+  }
+
+  return { kind: "ignored" };
+}
+
+async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLineCommand) {
   const { chatId, chatType, lineUserId } = getChatContext(event.source);
 
   switch (command.kind) {
@@ -1180,53 +1602,67 @@ async function handleResolvedCommand(
     case "menu-context-required":
       return getMenuContextExpiredPrompt();
 
-    case "xiaoer-help": {
-      const context = chatType !== "user" ? await getOrCreateGroupContext(event.source) : null;
-
+    case "xiaoer-help":
       if (lineUserId) {
+        const binding = chatType !== "user" ? await getOrCreateGroupContext(event.source) : null;
         await rememberMenuContext({
           chatId,
           lineUserId,
-          groupId: context?.group.id ?? null,
+          groupId: binding?.group.id ?? null,
           mode: "xiaoer"
         });
       }
-
       return withQuickReply(getXiaoerMenuText(), buildAssistantQuickReply());
-    }
 
-    case "settlement-help": {
-      const context = chatType !== "user" ? await getOrCreateGroupContext(event.source) : null;
-
+    case "settlement-help":
       if (lineUserId) {
+        const binding = chatType !== "user" ? await getOrCreateGroupContext(event.source) : null;
         await rememberMenuContext({
           chatId,
           lineUserId,
-          groupId: context?.group.id ?? null,
+          groupId: binding?.group.id ?? null,
           mode: "settlement"
         });
       }
-
       return withQuickReply(getSettlementMenuText(), buildSettlementQuickReply());
-    }
 
-    case "create-ledger-help": {
-      const required = await requireGroupContext(event);
-      if (!required.ok) {
-        return required.message;
+    case "create-ledger-help":
+      if (chatType === "user") {
+        return getGroupOnlyMessage();
       }
 
-      return startAwaitingActivityName({
-        groupId: required.context.group.id,
-        chatId,
-        lineUserId
-      });
-    }
+      return (async () => {
+        const binding = await getOrCreateGroupContext(event.source);
+        if (!binding) {
+          return getMissingGroupContextMessage();
+        }
 
-    case "shortcut": {
-      const resolved = await resolveShortcutCommand(event, command.number, command.payload);
-      return handleResolvedCommand(event, resolved);
-    }
+        return startAwaitingActivityName({
+          groupId: binding.group.id,
+          chatId,
+          lineUserId
+        });
+      })();
+
+    case "create-ledger":
+      if (!command.name) {
+        if (chatType === "user") {
+          return getGroupOnlyMessage();
+        }
+
+        const binding = await getOrCreateGroupContext(event.source);
+        if (!binding) {
+          return getMissingGroupContextMessage();
+        }
+
+        return startAwaitingActivityName({
+          groupId: binding.group.id,
+          chatId,
+          lineUserId
+        });
+      }
+
+      return handleCreateLedgerCommand(event, command.name);
 
     case "join-activity":
       return handleJoinOrLeaveWithRoster(event, "join");
@@ -1237,30 +1673,8 @@ async function handleResolvedCommand(
     case "confirm-members":
       return handleConfirmMembers(event);
 
-    case "confirm":
-      return handlePendingConfirmation(event, true);
-
-    case "cancel":
-      return handlePendingConfirmation(event, false);
-
-    case "create-ledger":
-      if (!command.name) {
-        const required = await requireGroupContext(event);
-        if (!required.ok) {
-          return required.message;
-        }
-
-        return startAwaitingActivityName({
-          groupId: required.context.group.id,
-          chatId,
-          lineUserId
-        });
-      }
-
-      return handleCreateLedgerCommand(event, command.name);
-
-    case "switch-ledger":
-      return handleSwitchLedger(event, command.name);
+    case "list-members":
+      return handleListMembers(event);
 
     case "current-ledger":
       return handleCurrentLedger(event);
@@ -1271,24 +1685,20 @@ async function handleResolvedCommand(
     case "group-info":
       return handleGroupInfo(event);
 
+    case "switch-ledger":
+      return handleSwitchLedger(event, command.name);
+
     case "list-ledgers":
       return handleListLedgers(event);
 
-    case "close-ledger":
-      return handleArchivePrompt(event);
+    case "expense-help":
+      return withQuickReply(
+        getExpenseGuideText(command.useLegacyAlias ?? false),
+        buildExpenseQuickReply()
+      );
 
-    case "archive-ledger": {
-      const required = await requireGroupContext(event);
-      if (!required.ok) {
-        return required.message;
-      }
-
-      const archived = await archiveLedger(required.context.group.id, command.name);
-      return `已封存活動：${archived.name}`;
-    }
-
-    case "list-archived-ledgers":
-      return handleArchivedLedgers(event);
+    case "recent-expenses":
+      return handleRecentExpenses(event);
 
     case "delete-last-expense":
       return handleDeleteLastExpense(event);
@@ -1299,45 +1709,95 @@ async function handleResolvedCommand(
     case "mvp":
       return handleMvp(event);
 
-    case "recent-expenses":
-      return handleRecentExpenses(event);
+    case "close-ledger":
+      return handleArchivePrompt(event);
 
-    case "expense-help":
-      return withQuickReply(getExpenseGuideText(), buildExpenseQuickReply());
+    case "archive-ledger": {
+      const { chatType: innerChatType } = getChatContext(event.source);
+      if (innerChatType === "user") {
+        return getGroupOnlyMessage();
+      }
+
+      const binding = await getOrCreateGroupContext(event.source);
+      if (!binding) {
+        return getMissingGroupContextMessage();
+      }
+
+      try {
+        const archived = await archiveLedger(binding.group.id, command.name);
+        return `已封存活動：${archived.name}`;
+      } catch (error) {
+        return error instanceof Error ? error.message : "封存活動時發生錯誤。";
+      }
+    }
+
+    case "list-archived-ledgers":
+      return handleArchivedLedgers(event);
+
+    case "start-payment-setup": {
+      if (chatType !== "user") {
+        return getPaymentSetupGuideText();
+      }
+
+      if (!lineUserId) {
+        return getMissingLineIdentityMessage();
+      }
+
+      const profile = await getOrCreateLineUserProfile(lineUserId);
+      const draft = defaultPaymentSetupDraft({
+        memberName: profile.memberName,
+        acceptBankTransfer: profile.acceptBankTransfer,
+        bankName: profile.bankName,
+        bankAccount: profile.bankAccount,
+        acceptLinePay: profile.acceptLinePay,
+        acceptCash: profile.acceptCash,
+        paymentNote: profile.paymentNote
+      });
+
+      await updateLineUserProfileDraft(
+        lineUserId,
+        PAYMENT_SETUP_STEPS.awaitingName,
+        draft
+      );
+
+      return "請先告訴我你的名字，之後我會幫你設定收款方式。";
+    }
+
+    case "identify-self": {
+      if (chatType !== "user") {
+        return "請私訊我使用這個功能。";
+      }
+
+      if (!lineUserId) {
+        return getMissingLineIdentityMessage();
+      }
+
+      await db.lineUserProfile.upsert({
+        where: { lineUserId },
+        update: {
+          memberName: command.name
+        },
+        create: {
+          lineUserId,
+          memberName: command.name
+        }
+      });
+
+      return `好，之後我就記得你是 ${command.name}。`;
+    }
 
     case "create-group":
-      return "現在不用先建立群組，直接在群組裡輸入「建立活動 活動名稱」就可以開始。";
-
     case "bind":
-      return "現在也不用手動綁定群組，小二會自動記住這個群組。";
-
-    case "identify-self":
-      if (chatType !== "user") {
-        return getPaymentSetupGuideText();
-      }
-
-      if (!lineUserId) {
-        return getMissingLineIdentityMessage();
-      }
-
-      return startPaymentSetup(lineUserId, command.name);
-
-    case "start-payment-setup":
-      if (chatType !== "user") {
-        return getPaymentSetupGuideText();
-      }
-
-      if (!lineUserId) {
-        return getMissingLineIdentityMessage();
-      }
-
-      return startPaymentSetup(lineUserId);
-
-    case "list-members":
-      return handleListMembers(event);
+      return "現在不需要手動綁定群組，直接用「建立活動」就可以開始。";
 
     case "expense":
-      return handleExpenseCommand(event, command);
+      return finalizeEqualExpense({
+        event,
+        title: command.title,
+        amount: command.amount,
+        payerName: command.payerName,
+        payerIsSender: command.payerIsSender
+      });
 
     default:
       return null;
@@ -1368,13 +1828,13 @@ async function handleMessageEvent(event: LineMessageEvent) {
   const parsed = parseLineCommand(event.message.text);
 
   if (lineUserId) {
-    const pendingState = await getPendingActionState({
+    const pendingActivityState = await getPendingActionState({
       chatId,
       requesterLineUserId: lineUserId,
       actionType: AWAITING_ACTIVITY_NAME_ACTION
     });
 
-    if (pendingState.pending) {
+    if (pendingActivityState.pending) {
       if (parsed.kind === "cancel") {
         await clearPendingAction({
           chatId,
@@ -1382,15 +1842,49 @@ async function handleMessageEvent(event: LineMessageEvent) {
           actionType: AWAITING_ACTIVITY_NAME_ACTION
         });
 
-        return "已取消建立活動";
+        return getAwaitingActivityCancelledPrompt();
       }
 
       if (parsed.kind === "ignored" && rawText) {
         return handleCreateLedgerFromPending(event, rawText);
       }
-    } else if (pendingState.expired && parsed.kind === "ignored" && rawText) {
+    } else if (pendingActivityState.expired && parsed.kind === "ignored" && rawText) {
       return getAwaitingActivityNameExpiredPrompt();
     }
+
+    const pendingExpenseState = await getPendingActionState({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: AWAITING_EXPENSE_DETAILS_ACTION
+    });
+
+    if (pendingExpenseState.pending) {
+      if (parsed.kind === "cancel") {
+        await clearPendingAction({
+          chatId,
+          requesterLineUserId: lineUserId,
+          actionType: AWAITING_EXPENSE_DETAILS_ACTION
+        });
+        return getAwaitingExpenseCancelledPrompt();
+      }
+
+      if (
+        parsed.kind !== "xiaoer-help" &&
+        parsed.kind !== "settlement-help" &&
+        parsed.kind !== "start-payment-setup" &&
+        parsed.kind !== "confirm" &&
+        parsed.kind !== "menu-context-required"
+      ) {
+        return handleExpenseDraftContinuation(event, pendingExpenseState.pending);
+      }
+    } else if (pendingExpenseState.expired && parsed.kind === "ignored" && rawText) {
+      return getAwaitingExpenseExpiredPrompt();
+    }
+  }
+
+  const multilineExpenseReply = await handleImmediateMultilineExpense(event);
+  if (multilineExpenseReply) {
+    return multilineExpenseReply;
   }
 
   if (parsed.kind === "confirm") {
@@ -1406,22 +1900,36 @@ async function handleMessageEvent(event: LineMessageEvent) {
     return handleResolvedCommand(event, resolved);
   }
 
+  if (parsed.kind === "expense" && shouldStartExpenseDraft(rawText, parsed)) {
+    const draftReply = await handleExpenseDraftStart(event);
+    if (draftReply) {
+      return draftReply;
+    }
+  }
+
   return handleResolvedCommand(event, parsed);
 }
 
-export async function handleLineEvent(event: LineEvent, _appBaseUrl?: string) {
-  if (event.type === "join") {
+async function handleJoinLikeEvent(event: LineJoinLikeEvent) {
+  if (event.source.type === "group" || event.source.type === "room") {
     await getOrCreateGroupContext(event.source);
     return getWelcomeJoinMessage();
   }
 
-  if (event.type === "follow") {
-    return "歡迎把小二加進群組。進群後直接輸入「建立活動 活動名稱」就能開始。";
+  return "你好，我是小二，之後可以把我拉進群組一起記帳。";
+}
+
+export async function handleLineEvent(
+  event: LineEvent,
+  _appBaseUrl: string
+): Promise<LineTextReplyPayload | null> {
+  if (event.type === "message" && event.message.type === "text") {
+    return handleMessageEvent(event);
   }
 
-  if (event.type !== "message" || event.message.type !== "text") {
-    return null;
+  if (event.type === "join" || event.type === "follow") {
+    return handleJoinLikeEvent(event);
   }
 
-  return handleMessageEvent(event);
+  return null;
 }
