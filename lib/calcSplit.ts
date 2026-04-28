@@ -12,7 +12,7 @@ export function splitAmountEvenly(
   }
 
   if (participantIds.length === 0) {
-    throw new Error("至少要有 1 位參與成員。");
+    throw new Error("至少要有 1 位分攤成員。");
   }
 
   const baseShare = Math.floor(amountCents / participantIds.length);

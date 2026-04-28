@@ -359,7 +359,7 @@ export async function switchActiveLedger(groupId: string, nameInput: unknown) {
     }
 
     if (target.status === LedgerStatus.archived) {
-      throw new Error("這個活動已經封存，不能直接切回目前活動。");
+      throw new Error("這個活動已經封存，請先恢復或建立新的活動。");
     }
 
     const previousActive = await tx.ledger.findFirst({

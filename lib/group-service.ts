@@ -64,7 +64,7 @@ function emptySummary() {
 
 function getDefaultGroupName(lineGroupId: string) {
   if (lineGroupId.startsWith("room:")) {
-    return `LINE 房間 ${lineGroupId.slice(-4)}`;
+    return `LINE 聊天室 ${lineGroupId.slice(-4)}`;
   }
 
   return `LINE 群組 ${lineGroupId.slice(-4)}`;
@@ -422,9 +422,9 @@ export async function createExpenseInGroup(input: {
   participantIds: unknown;
   notes?: unknown;
 }) {
-  const title = assertNonEmptyString(input.title, "支出名稱");
+  const title = assertNonEmptyString(input.title, "支出項目");
   const payerId = assertNonEmptyString(input.payerId, "付款人");
-  const participantIds = assertStringArray(input.participantIds, "參與成員");
+  const participantIds = assertStringArray(input.participantIds, "分攤成員");
   const notes =
     typeof input.notes === "string" && input.notes.trim().length > 0
       ? input.notes.trim()
@@ -440,11 +440,11 @@ export async function createExpenseInGroup(input: {
   const activeLedger = await getActiveLedger(input.groupId);
 
   if (!activeLedger) {
-    throw new Error("目前沒有進行中的帳本，請先輸入：建立活動 活動名稱");
+    throw new Error("目前沒有進行中的活動，請先建立活動。");
   }
 
   if (activeLedger.isCollectingMembers) {
-    throw new Error("成員還在報名中，請先確認成員後再開始記帳。");
+    throw new Error("成員還沒確認完成，請先確認成員再記帳。");
   }
 
   const activeParticipants = await db.ledgerParticipant.findMany({
@@ -457,11 +457,11 @@ export async function createExpenseInGroup(input: {
   const validMemberIds = new Set(activeParticipants.map((participant) => participant.memberId));
 
   if (!validMemberIds.has(payerId)) {
-    throw new Error("付款人不在這次活動的已確認成員中。");
+    throw new Error("付款人不在本次活動名單中。");
   }
 
   if (participantIds.some((participantId) => !validMemberIds.has(participantId))) {
-    throw new Error("有參與成員不在這次活動的已確認名單中。");
+    throw new Error("分攤成員中有人不在本次活動名單中。");
   }
 
   const shares = splitAmountEvenly(amountCents, participantIds);
@@ -543,6 +543,73 @@ export async function getRecentExpenses(groupId: string, take = 5) {
     activeLedger,
     expenses,
     totalExpenseCents: aggregate._sum.amountCents ?? 0
+  };
+}
+
+export async function calculateSettlement(sessionId: string) {
+  const ledger = await db.ledger.findUnique({
+    where: {
+      id: sessionId
+    }
+  });
+
+  if (!ledger) {
+    return null;
+  }
+
+  const group = await getGroupWithMembers(ledger.groupId);
+
+  if (!group) {
+    return null;
+  }
+
+  const activeMembers = await db.ledgerParticipant.findMany({
+    where: {
+      ledgerId: sessionId,
+      isActive: true
+    },
+    include: {
+      member: true
+    },
+    orderBy: {
+      joinedAt: "asc"
+    }
+  });
+
+  const expenses = await db.expense.findMany({
+    where: {
+      ledgerId: sessionId
+    },
+    include: {
+      payer: true,
+      participants: {
+        include: {
+          member: true
+        }
+      }
+    },
+    orderBy: {
+      createdAt: "desc"
+    }
+  });
+
+  const summary = buildGroupSummary({
+    id: group.id,
+    name: group.name ?? getDefaultGroupName(group.lineGroupId ?? group.id),
+    createdAt: group.createdAt,
+    members: activeMembers.map((participant) => participant.member),
+    expenses
+  });
+
+  return {
+    ledger,
+    summary,
+    lines:
+      summary.settlement.length > 0
+        ? summary.settlement.map(
+            (item) => `${item.fromName} → ${item.toName} ${formatCents(item.amountCents)}`
+          )
+        : ["目前已經結清，不用再轉帳。"]
   };
 }
 

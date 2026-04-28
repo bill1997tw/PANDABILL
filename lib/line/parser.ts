@@ -34,11 +34,11 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "settlement-help" };
   }
 
-  if (["+", "+1", "++", "我要去", "參加"].includes(normalized)) {
+  if (["+", "+1", "++", "加入", "我要加入", "我要去", "參加"].includes(normalized)) {
     return { kind: "join-activity" };
   }
 
-  if (["-", "-1", "不去", "退出"].includes(normalized)) {
+  if (["-", "-1", "退出", "我要退出", "不去"].includes(normalized)) {
     return { kind: "leave-activity" };
   }
 
@@ -97,7 +97,7 @@ export function parseLineCommand(text: string): ParsedLineCommand {
   }
 
   if (
-    ["刪除最近一筆支出", "6刪除最近一筆支出", "6 刪除最近一筆支出"].includes(
+    ["刪除最近一筆支出", "刪除上一筆", "撤銷", "6刪除最近一筆支出", "6 刪除最近一筆支出"].includes(
       normalized
     )
   ) {

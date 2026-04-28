@@ -20,5 +20,5 @@ export function getExpenseGuideText() {
 }
 
 export function getPaymentSetupGuideText() {
-  return "請私聊我使用此功能";
+  return "請私聊我使用此功能。";
 }

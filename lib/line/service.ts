@@ -30,6 +30,7 @@ import { getMvpText, getSettlementSummaryText } from "@/lib/commands/settlement"
 import { formatCents } from "@/lib/currency";
 import { db } from "@/lib/db";
 import {
+  calculateSettlement,
   createExpenseInGroup,
   formatExpenseLine,
   getActiveLedgerExpenseMvp,
@@ -51,8 +52,8 @@ import {
   getActiveLedgerParticipants,
   joinCollectingLedger,
   listLedgers,
-  leaveCollectingLedger,
-  switchActiveLedger
+  switchActiveLedger,
+  leaveCollectingLedger
 } from "@/lib/ledger-service";
 import {
   defaultPaymentSetupDraft,
@@ -79,6 +80,7 @@ import type { LineTextReplyPayload } from "@/lib/line/client";
 import type { LineEvent, LineMessageEvent, ParsedLineCommand } from "@/lib/line/types";
 
 const AWAITING_ACTIVITY_NAME_ACTION = PendingActionType.awaiting_activity_name;
+
 type GroupContext = NonNullable<Awaited<ReturnType<typeof getOrCreateGroupContext>>>;
 
 function getChatContext(source: LineEvent["source"]) {
@@ -117,17 +119,6 @@ function getGroupContextUnavailableMessage() {
   return "目前暫時找不到這個群組資料，請稍後再試。";
 }
 
-function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextReplyPayload {
-  if (!quickReply) {
-    return text;
-  }
-
-  return {
-    text,
-    quickReply
-  };
-}
-
 function getWelcomeJoinMessage() {
   return [
     "我已加入這個群組，可直接建立活動與記帳。",
@@ -146,6 +137,17 @@ function getAwaitingActivityNameExpiredPrompt() {
   return "建立活動已逾時，請重新輸入「建立活動」";
 }
 
+function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextReplyPayload {
+  if (!quickReply) {
+    return text;
+  }
+
+  return {
+    text,
+    quickReply
+  };
+}
+
 function parseBooleanChoice(text: string) {
   const normalized = text.trim();
 
@@ -161,7 +163,7 @@ function parseBooleanChoice(text: string) {
 }
 
 function isSkipText(text: string) {
-  return ["略過", "跳過", "不用", "無", "skip"].includes(text.trim());
+  return ["略過", "不用", "無", "skip"].includes(text.trim());
 }
 
 function formatSpeechAmount(cents: number) {
@@ -201,10 +203,10 @@ async function resolveActorDisplayName(
       return matchedMember.name;
     }
 
-    return `群友${lineUserId.slice(-4)}`;
+    return `使用者${lineUserId.slice(-4)}`;
   }
 
-  return "未知成員";
+  return "使用者";
 }
 
 async function requireGroupContext(event: LineMessageEvent) {
@@ -252,10 +254,10 @@ async function startAwaitingActivityName(input: {
   return getAwaitingActivityNamePrompt();
 }
 
-async function startPaymentSetup(lineUserId: string) {
+async function startPaymentSetup(lineUserId: string, presetName?: string) {
   const profile = await getOrCreateLineUserProfile(lineUserId);
   const draft = defaultPaymentSetupDraft({
-    memberName: profile.memberName,
+    memberName: presetName ?? profile.memberName,
     acceptBankTransfer: profile.acceptBankTransfer,
     bankName: profile.bankName,
     bankAccount: profile.bankAccount,
@@ -271,7 +273,7 @@ async function startPaymentSetup(lineUserId: string) {
       draft
     );
 
-    return ["先幫你設定付款方式。", "請輸入：我是誰"].join("\n");
+    return ["先告訴小二你是誰。", "請輸入：我是你的名字"].join("\n");
   }
 
   await updateLineUserProfileDraft(
@@ -280,7 +282,7 @@ async function startPaymentSetup(lineUserId: string) {
     draft
   );
 
-  return ["先來設定收款方式。", "你要收銀行匯款嗎？請回覆：是 / 否"].join("\n");
+  return ["先設定銀行匯款。", "你要收銀行轉帳嗎？請回：是 / 否"].join("\n");
 }
 
 async function finishPaymentSetup(lineUserId: string, draft: PaymentSetupDraft) {
@@ -314,7 +316,7 @@ async function finishPaymentSetup(lineUserId: string, draft: PaymentSetupDraft) 
   });
 
   return formatPaymentSummary({
-    memberName: draft.memberName ?? "未知成員",
+    memberName: draft.memberName ?? "使用者",
     acceptBankTransfer: draft.acceptBankTransfer,
     bankName: draft.bankName,
     bankAccount: draft.bankAccount,
@@ -338,7 +340,7 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
   switch (setupState) {
     case PAYMENT_SETUP_STEPS.awaitingName: {
       if (!message.startsWith("我是")) {
-        return "請用「我是姓名」告訴我你是誰。";
+        return "請輸入：我是你的名字";
       }
 
       draft.memberName = message.replace(/^我是/u, "").trim();
@@ -348,14 +350,13 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
         draft
       );
 
-      return "你要收銀行匯款嗎？請回覆：是 / 否";
+      return "你要收銀行轉帳嗎？請回：是 / 否";
     }
 
     case PAYMENT_SETUP_STEPS.awaitingBankChoice: {
       const choice = parseBooleanChoice(message);
-
       if (choice === null) {
-        return "請回覆：是 / 否";
+        return "請回：是 / 否";
       }
 
       draft.acceptBankTransfer = choice;
@@ -378,7 +379,7 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
         draft
       );
 
-      return "你要收 LINE Pay 嗎？請回覆：是 / 否";
+      return "你要收 LINE Pay 嗎？請回：是 / 否";
     }
 
     case PAYMENT_SETUP_STEPS.awaitingBankName: {
@@ -408,14 +409,13 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
         draft
       );
 
-      return "你要收 LINE Pay 嗎？請回覆：是 / 否";
+      return "你要收 LINE Pay 嗎？請回：是 / 否";
     }
 
     case PAYMENT_SETUP_STEPS.awaitingLinePayChoice: {
       const choice = parseBooleanChoice(message);
-
       if (choice === null) {
-        return "請回覆：是 / 否";
+        return "請回：是 / 否";
       }
 
       draft.acceptLinePay = choice;
@@ -425,14 +425,13 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
         draft
       );
 
-      return "你要收現金嗎？請回覆：是 / 否";
+      return "你要收現金嗎？請回：是 / 否";
     }
 
     case PAYMENT_SETUP_STEPS.awaitingCashChoice: {
       const choice = parseBooleanChoice(message);
-
       if (choice === null) {
-        return "請回覆：是 / 否";
+        return "請回：是 / 否";
       }
 
       draft.acceptCash = choice;
@@ -442,7 +441,7 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
         draft
       );
 
-      return "有沒有備註要補充？沒有的話回覆：略過";
+      return "有沒有付款備註？沒有的話請回：略過";
     }
 
     case PAYMENT_SETUP_STEPS.awaitingNote: {
@@ -479,18 +478,44 @@ async function resolveShortcutCommand(
         ? { kind: "create-ledger", name: trimmedPayload }
         : { kind: "create-ledger-help" };
     }
-    if (number === 2) return { kind: "confirm-members" };
-    if (number === 3) return { kind: "start-payment-setup" };
-    if (number === 4) return { kind: "expense-help" };
-    if (number === 5) return { kind: "recent-expenses" };
-    if (number === 6) return { kind: "delete-last-expense" };
+
+    if (number === 2) {
+      return { kind: "confirm-members" };
+    }
+
+    if (number === 3) {
+      return { kind: "start-payment-setup" };
+    }
+
+    if (number === 4) {
+      return { kind: "expense-help" };
+    }
+
+    if (number === 5) {
+      return { kind: "recent-expenses" };
+    }
+
+    if (number === 6) {
+      return { kind: "delete-last-expense" };
+    }
   }
 
   if (menuMode === "settlement") {
-    if (number === 1) return { kind: "settlement" };
-    if (number === 2) return { kind: "mvp" };
-    if (number === 3) return { kind: "close-ledger" };
-    if (number === 4) return { kind: "list-archived-ledgers" };
+    if (number === 1) {
+      return { kind: "settlement" };
+    }
+
+    if (number === 2) {
+      return { kind: "mvp" };
+    }
+
+    if (number === 3) {
+      return { kind: "close-ledger" };
+    }
+
+    if (number === 4) {
+      return { kind: "list-archived-ledgers" };
+    }
   }
 
   return { kind: "ignored" };
@@ -747,11 +772,11 @@ async function handleExpenseCommand(
   }
 
   if (confirmed.ledger.isCollectingMembers) {
-    return "成員還沒確認完成，請先確認成員。";
+    return "成員還沒確認完成，請先確認成員再記帳。";
   }
 
   if (confirmed.memberIds.length === 0) {
-    return "這個活動還沒有確認成員，請先確認成員。";
+    return "目前活動沒有已確認的成員，請先確認成員再記帳。";
   }
 
   const payer = await resolvePayerMember({
@@ -763,13 +788,13 @@ async function handleExpenseCommand(
   });
 
   if (!payer) {
-    return "我找不到付款人是誰，請改成像「晚餐 2000 阿豪付」這種格式。";
+    return "找不到付款人，請用比較清楚的寫法，例如：晚餐 2000 阿豪付。";
   }
 
-  let participantIds = confirmed.memberIds;
+  const participantIds = confirmed.memberIds;
 
   if (command.participantCount && command.participantCount !== confirmed.memberIds.length) {
-    return `你寫了 ${command.participantCount} 人分，但目前已確認成員有 ${confirmed.memberIds.length} 位，請補充更明確的分攤方式。`;
+    return `你寫了 ${command.participantCount} 人分，但目前已確認成員有 ${confirmed.memberIds.length} 位，請補充更明確的分攤對象。`;
   }
 
   const result = await createExpenseInGroup({
@@ -781,12 +806,23 @@ async function handleExpenseCommand(
     notes: "由 LINE Bot 建立"
   });
 
+  const settlement = await calculateSettlement(result.ledger.id);
+  const settlementLines =
+    settlement?.lines.length && settlement.lines[0] !== "目前已經結清，不用再轉帳。"
+      ? settlement.lines
+      : ["目前已經結清，不用再轉帳。"];
+
   return [
-    `已記到活動：${result.ledger.name}`,
-    result.expense.title,
+    `已新增支出：${result.expense.title}`,
     `金額：NT$ ${result.expense.amountDisplay}`,
     `付款人：${result.expense.payer.name}`,
-    `分攤人數：${result.expense.participants.length} 位`
+    `分攤人數：${result.expense.participants.length} 人`,
+    `每人：NT$ ${formatCents(
+      result.expense.participants[0]?.shareCents ?? result.expense.amountCents
+    )}`,
+    "",
+    `目前活動：${result.ledger.name}`,
+    ...settlementLines
   ].join("\n");
 }
 
@@ -826,12 +862,6 @@ async function handleDeleteLastExpense(event: LineMessageEvent) {
     return required.message;
   }
 
-  const { chatId, lineUserId } = getChatContext(event.source);
-
-  if (!lineUserId) {
-    return getMissingLineIdentityMessage();
-  }
-
   const activeLedger = await getActiveLedger(required.context.group.id);
 
   if (!activeLedger) {
@@ -848,18 +878,28 @@ async function handleDeleteLastExpense(event: LineMessageEvent) {
   });
 
   if (!latestExpense) {
-    return `目前活動 ${activeLedger.name} 還沒有支出紀錄可以刪除。`;
+    return `目前活動 ${activeLedger.name} 還沒有可刪除的紀錄。`;
   }
 
-  await createPendingAction({
-    groupId: required.context.group.id,
-    chatId,
-    requesterLineUserId: lineUserId,
-    actionType: PendingActionType.delete_recent_expense,
-    targetExpenseId: latestExpense.id
+  await db.expense.delete({
+    where: {
+      id: latestExpense.id
+    }
   });
 
-  return "確定要刪除最近一筆支出嗎？請回覆 是 或 否";
+  const settlement = await calculateSettlement(activeLedger.id);
+  const settlementLines =
+    settlement?.lines.length && settlement.lines[0] !== "目前已經結清，不用再轉帳。"
+      ? settlement.lines
+      : ["目前已經結清，不用再轉帳。"];
+
+  return [
+    `已刪除：${latestExpense.title}`,
+    `金額：NT$ ${formatSpeechAmount(latestExpense.amountCents)}`,
+    "",
+    `目前活動：${activeLedger.name}`,
+    ...settlementLines
+  ].join("\n");
 }
 
 async function handleSettlement(event: LineMessageEvent) {
@@ -933,7 +973,7 @@ async function handleArchivePrompt(event: LineMessageEvent) {
   }
 
   if (activeLedger.creatorLineUserId && activeLedger.creatorLineUserId !== lineUserId) {
-    return "只有本次活動建立者可以結束並封存活動";
+    return "只有活動建立者可以結束並封存活動。";
   }
 
   await createPendingAction({
@@ -947,7 +987,7 @@ async function handleArchivePrompt(event: LineMessageEvent) {
   return [
     "提醒大人：請先確認本次費用是否都已結清。",
     "確定要結束並封存這次活動嗎？",
-    "請回覆 是 或 否"
+    "請回覆：是 或 否"
   ].join("\n");
 }
 
@@ -1024,9 +1064,7 @@ async function handleResetLedger(event: LineMessageEvent) {
   }
 
   const closed = await closeActiveLedger(required.context.group.id);
-  return closed
-    ? `已重置活動：${closed.name}`
-    : getNoActiveLedgerText();
+  return closed ? `已重置活動：${closed.name}` : getNoActiveLedgerText();
 }
 
 async function handleGroupInfo(event: LineMessageEvent) {
@@ -1044,7 +1082,7 @@ async function handleGroupInfo(event: LineMessageEvent) {
   return [
     `群組名稱：${info.name}`,
     `群組狀態：${info.status}`,
-    `LINE 群組 ID：${info.lineGroupId ?? "未記錄"}`,
+    `LINE 群組 ID：${info.lineGroupId ?? "無"}`,
     `建立時間：${info.createdAt.toLocaleString("zh-TW", { hour12: false })}`,
     `目前活動：${info.activeLedgerName ?? "尚未建立活動"}`
   ].join("\n");
@@ -1057,7 +1095,7 @@ async function handlePendingConfirmation(
   const { chatId, lineUserId, chatType } = getChatContext(event.source);
 
   if (chatType === "user") {
-    return "目前沒有需要在私聊中確認的操作。";
+    return "目前沒有需要確認的群組操作。";
   }
 
   if (!lineUserId) {
@@ -1070,7 +1108,7 @@ async function handlePendingConfirmation(
   });
 
   if (!pending) {
-    return "目前沒有需要確認的操作。";
+    return "目前沒有等待你確認的操作。";
   }
 
   await clearPendingAction({
@@ -1084,6 +1122,18 @@ async function handlePendingConfirmation(
     }
 
     return "已取消操作";
+  }
+
+  if (pending.actionType === PendingActionType.archive_active_ledger) {
+    const archived = pending.targetLedgerId
+      ? await archiveActiveLedger(pending.groupId)
+      : null;
+
+    if (!archived) {
+      return "找不到要封存的活動。";
+    }
+
+    return `已封存活動：${archived.name}`;
   }
 
   if (pending.actionType === PendingActionType.delete_recent_expense) {
@@ -1110,23 +1160,11 @@ async function handlePendingConfirmation(
     return `已刪除一筆 ${formatSpeechAmount(expense.amountCents)} 元的支出`;
   }
 
-  if (pending.actionType === PendingActionType.archive_active_ledger) {
-    const archived = pending.targetLedgerId
-      ? await archiveActiveLedger(pending.groupId)
-      : null;
-
-    if (!archived) {
-      return "找不到要封存的活動。";
-    }
-
-    return `已成功封存活動：${archived.name}`;
-  }
-
   if (pending.actionType === AWAITING_ACTIVITY_NAME_ACTION) {
     return getAwaitingActivityNamePrompt();
   }
 
-  return "目前沒有需要確認的操作。";
+  return "目前沒有等待你確認的操作。";
 }
 
 async function handleResolvedCommand(
@@ -1246,7 +1284,7 @@ async function handleResolvedCommand(
       }
 
       const archived = await archiveLedger(required.context.group.id, command.name);
-      return `已封存指定活動：${archived.name}`;
+      return `已封存活動：${archived.name}`;
     }
 
     case "list-archived-ledgers":
@@ -1268,17 +1306,21 @@ async function handleResolvedCommand(
       return withQuickReply(getExpenseGuideText(), buildExpenseQuickReply());
 
     case "create-group":
-      return "現在不用手動建立群組了，把我加進群組後就能直接使用。";
+      return "現在不用先建立群組，直接在群組裡輸入「建立活動 活動名稱」就可以開始。";
 
     case "bind":
-      return "現在不用再綁定群組，群組一建立我就會自動記住。";
+      return "現在也不用手動綁定群組，小二會自動記住這個群組。";
 
     case "identify-self":
       if (chatType !== "user") {
         return getPaymentSetupGuideText();
       }
 
-      return startPaymentSetup(lineUserId ?? "");
+      if (!lineUserId) {
+        return getMissingLineIdentityMessage();
+      }
+
+      return startPaymentSetup(lineUserId, command.name);
 
     case "start-payment-setup":
       if (chatType !== "user") {
@@ -1374,7 +1416,7 @@ export async function handleLineEvent(event: LineEvent, _appBaseUrl?: string) {
   }
 
   if (event.type === "follow") {
-    return "歡迎私聊小二！之後如果要設定收款方式，直接輸入「設定收款方式」就可以了。";
+    return "歡迎把小二加進群組。進群後直接輸入「建立活動 活動名稱」就能開始。";
   }
 
   if (event.type !== "message" || event.message.type !== "text") {

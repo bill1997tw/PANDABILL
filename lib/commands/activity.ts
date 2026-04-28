@@ -15,7 +15,8 @@ export function getCollectingMembersPrompt(activityName: string, memberNames: st
     "+ / +1 加入",
     "- / -1 退出",
     "",
-    "全部確認後請按「確認成員」"
+    "全部確認後請按「確認成員」",
+    "記帳範例：晚餐 600 我付"
   ].join("\n");
 }
 
