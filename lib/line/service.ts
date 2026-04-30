@@ -121,6 +121,33 @@ function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextRepl
   };
 }
 
+function isUrlLikeText(text: string) {
+  const normalized = text.trim().toLowerCase();
+  return normalized.startsWith("http://") || normalized.startsWith("https://");
+}
+
+function isGroupWhitelistedCommand(parsed: ParsedLineCommand) {
+  switch (parsed.kind) {
+    case "xiaoer-help":
+    case "settlement-help":
+    case "create-ledger":
+    case "create-ledger-help":
+    case "expense-help":
+    case "recent-expenses":
+    case "delete-last-expense":
+    case "confirm-members":
+    case "start-payment-setup":
+    case "join-activity":
+    case "leave-activity":
+    case "cancel":
+    case "settlement":
+    case "mvp":
+      return true;
+    default:
+      return false;
+  }
+}
+
 function formatAmountForDisplay(cents: number) {
   return cents % 100 === 0 ? String(cents / 100) : formatCents(cents);
 }
@@ -165,6 +192,23 @@ function getAwaitingExpenseExpiredPrompt() {
 
 function getAwaitingExpenseCancelledPrompt() {
   return "已取消新增支出";
+}
+
+function getAwaitingExpensePrompt() {
+  return [
+    "請直接輸入支出內容：",
+    "",
+    "例如：",
+    "晚餐600我付",
+    "",
+    "或",
+    "",
+    "飲料185",
+    "周永豪付",
+    "100陳彥廷",
+    "50張祥豪",
+    "35周永濠"
+  ].join("\n");
 }
 
 function getAwaitingActivityCancelledPrompt() {
@@ -1163,6 +1207,43 @@ async function handleExpenseDraftStart(event: LineMessageEvent) {
   return `已記下：${header.title} ${header.amount}\n請再輸入付款人，例如：周永豪付`;
 }
 
+async function startAwaitingExpenseInput(event: LineMessageEvent) {
+  const { chatType, chatId, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  if (!lineUserId) {
+    return getMissingLineIdentityMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const confirmed = await getConfirmedMemberIdsForActiveLedger(binding.group.id);
+  if (!confirmed.ledger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (confirmed.ledger.isCollectingMembers) {
+    return getExpenseNotAllowedText();
+  }
+
+  await createPendingAction({
+    groupId: binding.group.id,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: AWAITING_EXPENSE_DETAILS_ACTION,
+    payload: null,
+    ttlMinutes: 5
+  });
+
+  return withQuickReply(getAwaitingExpensePrompt(), buildExpenseQuickReply());
+}
+
 async function handleExpenseDraftContinuation(
   event: LineMessageEvent,
   pending: Awaited<ReturnType<typeof getPendingActionState>>["pending"]
@@ -1753,10 +1834,14 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
       return handleListLedgers(event);
 
     case "expense-help":
-      return withQuickReply(
-        getExpenseGuideText(command.useLegacyAlias ?? false),
-        buildExpenseQuickReply()
-      );
+      if (command.useLegacyAlias ?? false) {
+        return withQuickReply(
+          getExpenseGuideText(true),
+          buildExpenseQuickReply()
+        );
+      }
+
+      return startAwaitingExpenseInput(event);
 
     case "recent-expenses":
       return handleRecentExpenses(event);
@@ -1886,6 +1971,9 @@ async function handleMessageEvent(event: LineMessageEvent) {
   }
 
   const rawText = event.message.text.trim();
+  if (chatType !== "user" && isUrlLikeText(rawText)) {
+    return null;
+  }
   const parsed = parseLineCommand(event.message.text);
 
   if (lineUserId) {
@@ -1929,6 +2017,35 @@ async function handleMessageEvent(event: LineMessageEvent) {
         return getAwaitingExpenseCancelledPrompt();
       }
 
+      if (!pendingExpenseState.pending.payload) {
+        const multilineExpenseReply = await handleImmediateMultilineExpense(event);
+        if (multilineExpenseReply) {
+          await clearPendingAction({
+            chatId,
+            requesterLineUserId: lineUserId,
+            actionType: AWAITING_EXPENSE_DETAILS_ACTION
+          });
+          return multilineExpenseReply;
+        }
+
+        if (parsed.kind === "expense") {
+          await clearPendingAction({
+            chatId,
+            requesterLineUserId: lineUserId,
+            actionType: AWAITING_EXPENSE_DETAILS_ACTION
+          });
+          return finalizeEqualExpense({
+            event,
+            title: parsed.title,
+            amount: parsed.amount,
+            payerName: parsed.payerName,
+            payerIsSender: parsed.payerIsSender
+          });
+        }
+
+        return getAwaitingExpensePrompt();
+      }
+
       if (
         parsed.kind !== "xiaoer-help" &&
         parsed.kind !== "settlement-help" &&
@@ -1941,11 +2058,6 @@ async function handleMessageEvent(event: LineMessageEvent) {
     } else if (pendingExpenseState.expired && parsed.kind === "ignored" && rawText) {
       return getAwaitingExpenseExpiredPrompt();
     }
-  }
-
-  const multilineExpenseReply = await handleImmediateMultilineExpense(event);
-  if (multilineExpenseReply) {
-    return multilineExpenseReply;
   }
 
   if (parsed.kind === "confirm") {
@@ -1961,10 +2073,29 @@ async function handleMessageEvent(event: LineMessageEvent) {
     return handleResolvedCommand(event, resolved);
   }
 
-  if (parsed.kind === "expense" && shouldStartExpenseDraft(rawText, parsed)) {
-    const draftReply = await handleExpenseDraftStart(event);
-    if (draftReply) {
-      return draftReply;
+  if (chatType !== "user") {
+    if (parsed.kind === "ignored") {
+      return null;
+    }
+
+    if (parsed.kind === "expense") {
+      return null;
+    }
+
+    if (!isGroupWhitelistedCommand(parsed)) {
+      return null;
+    }
+  } else {
+    const multilineExpenseReply = await handleImmediateMultilineExpense(event);
+    if (multilineExpenseReply) {
+      return multilineExpenseReply;
+    }
+
+    if (parsed.kind === "expense" && shouldStartExpenseDraft(rawText, parsed)) {
+      const draftReply = await handleExpenseDraftStart(event);
+      if (draftReply) {
+        return draftReply;
+      }
     }
   }
 
