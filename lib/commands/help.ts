@@ -44,5 +44,5 @@ export function getExpenseGuideText(useLegacyAlias = false) {
 }
 
 export function getPaymentSetupGuideText() {
-  return "請私聊我使用此功能";
+  return "請私聊小二設定收款方式～";
 }
