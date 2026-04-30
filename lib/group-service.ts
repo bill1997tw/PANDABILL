@@ -127,6 +127,7 @@ function hasCompletedPaymentMethod(
   profile:
     | {
         acceptBankTransfer: boolean;
+        bankName: string | null;
         bankAccount: string | null;
         acceptLinePay: boolean;
         acceptCash: boolean;
@@ -141,7 +142,7 @@ function hasCompletedPaymentMethod(
   return (
     (profile.acceptBankTransfer && Boolean(profile.bankAccount)) ||
     profile.acceptLinePay ||
-    profile.acceptCash
+    (profile.acceptCash && profile.bankName === "現金")
   );
 }
 

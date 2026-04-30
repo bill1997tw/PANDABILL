@@ -149,7 +149,7 @@ export function parseLineCommand(text: string): ParsedLineCommand {
   }
 
   if (
-    ["4設定收款", "4 設定收款", "設定收款方式", "設定收款"].includes(normalized)
+    ["4設定收款", "4 設定收款", "設定收款方式", "設定收款", "設定"].includes(normalized)
   ) {
     return { kind: "start-payment-setup" };
   }

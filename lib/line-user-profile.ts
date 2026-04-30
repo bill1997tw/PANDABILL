@@ -3,12 +3,10 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 
 export const PAYMENT_SETUP_STEPS = {
-  awaitingName: "awaiting_name",
-  awaitingBankChoice: "awaiting_bank_choice",
-  awaitingBankName: "awaiting_bank_name",
-  awaitingBankAccount: "awaiting_bank_account",
+  awaitingMethodChoice: "awaiting_method_choice",
+  awaitingBankInfo: "awaiting_bank_info",
   awaitingLinePayChoice: "awaiting_linepay_choice",
-  awaitingCashChoice: "awaiting_cash_choice",
+  awaitingOtherMethod: "awaiting_other_method",
   awaitingNote: "awaiting_note"
 } as const;
 
@@ -46,7 +44,7 @@ export function defaultPaymentSetupDraft(
     bankName: profile?.bankName ?? null,
     bankAccount: profile?.bankAccount ?? null,
     acceptLinePay: profile?.acceptLinePay ?? false,
-    acceptCash: profile?.acceptCash ?? true,
+    acceptCash: profile?.acceptCash ?? false,
     paymentNote: profile?.paymentNote ?? null
   };
 }
@@ -71,7 +69,7 @@ export function parsePaymentSetupDraft(value: Prisma.JsonValue | null | undefine
     acceptLinePay:
       typeof candidate.acceptLinePay === "boolean" ? candidate.acceptLinePay : false,
     acceptCash:
-      typeof candidate.acceptCash === "boolean" ? candidate.acceptCash : true,
+      typeof candidate.acceptCash === "boolean" ? candidate.acceptCash : false,
     paymentNote:
       typeof candidate.paymentNote === "string" ? candidate.paymentNote : null
   });
@@ -91,21 +89,36 @@ export function serializePaymentSetupDraft(
   };
 }
 
-export function getCurrentPaymentDraft(profile: LineUserProfileRecord | null) {
-  const draft = parsePaymentSetupDraft(profile?.setupDraft);
-
+function normalizePersistedProfile(profile: LineUserProfileRecord | null) {
   if (!profile) {
-    return draft;
+    return defaultPaymentSetupDraft();
   }
 
+  const hasExplicitCash = profile.acceptCash && profile.bankName === "現金";
+
   return defaultPaymentSetupDraft({
-    memberName: draft.memberName ?? profile.memberName,
-    acceptBankTransfer: draft.acceptBankTransfer ?? profile.acceptBankTransfer,
-    bankName: draft.bankName ?? profile.bankName,
-    bankAccount: draft.bankAccount ?? profile.bankAccount,
-    acceptLinePay: draft.acceptLinePay ?? profile.acceptLinePay,
-    acceptCash: draft.acceptCash ?? profile.acceptCash,
-    paymentNote: draft.paymentNote ?? profile.paymentNote
+    memberName: profile.memberName,
+    acceptBankTransfer: profile.acceptBankTransfer,
+    bankName: profile.bankName,
+    bankAccount: profile.bankAccount,
+    acceptLinePay: profile.acceptLinePay,
+    acceptCash: hasExplicitCash,
+    paymentNote: profile.paymentNote
+  });
+}
+
+export function getCurrentPaymentDraft(profile: LineUserProfileRecord | null) {
+  const draft = parsePaymentSetupDraft(profile?.setupDraft);
+  const persisted = normalizePersistedProfile(profile);
+
+  return defaultPaymentSetupDraft({
+    memberName: draft.memberName ?? persisted.memberName,
+    acceptBankTransfer: draft.acceptBankTransfer || persisted.acceptBankTransfer,
+    bankName: draft.bankName ?? persisted.bankName,
+    bankAccount: draft.bankAccount ?? persisted.bankAccount,
+    acceptLinePay: draft.acceptLinePay || persisted.acceptLinePay,
+    acceptCash: draft.acceptCash || persisted.acceptCash,
+    paymentNote: draft.paymentNote ?? persisted.paymentNote
   });
 }
 
