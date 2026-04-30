@@ -30,10 +30,10 @@ export function getExpenseGuideText(useLegacyAlias = false) {
     "晚餐600我付",
     "",
     "飲料185",
-    "周永豪付",
-    "100陳彥廷",
-    "50張祥豪",
-    "35周永濠"
+    "小明付",
+    "100小華",
+    "50小美",
+    "35小明"
   ];
 
   if (!useLegacyAlias) {
@@ -44,5 +44,5 @@ export function getExpenseGuideText(useLegacyAlias = false) {
 }
 
 export function getPaymentSetupGuideText() {
-  return "請私訊我使用此功能";
+  return "請私聊我使用此功能";
 }
