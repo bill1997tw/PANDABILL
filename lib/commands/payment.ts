@@ -44,12 +44,30 @@ export function getPaymentSetupMenuText() {
 
 export function getBankAccountPrompt() {
   return [
-    "\u8acb\u8f38\u5165\u9280\u884c\u6536\u6b3e\u8cc7\u8a0a\uff1a",
+    "\u8acb\u76f4\u63a5\u8f38\u5165\u9280\u884c\u8cc7\u8a0a\uff1a",
     "",
-    "\u7bc4\u4f8b\uff1a",
-    "\u570b\u6cf0 013",
-    "\u5e33\u865f\uff1a123456789012",
-    "\u6236\u540d\uff1a\u738b\u5c0f\u660e"
+    "\u4f8b\u5982\uff1a",
+    "\u53f0\u65b0812 / 123456789",
+    "",
+    "\u6216",
+    "\u570b\u6cf0013 / 987654321",
+    "",
+    "\u683c\u5f0f\uff1a",
+    "\u9280\u884c\u540d\u7a31\uff0b\u4ee3\u78bc / \u5e33\u865f",
+    "",
+    "\u4f8b\u5982\uff1a",
+    "\u53f0\u65b0812 / 123456789"
+  ].join("\n");
+}
+
+export function getBankAccountInvalidPrompt() {
+  return [
+    "\u8acb\u4f9d\u7167\u4ee5\u4e0b\u683c\u5f0f\u8f38\u5165\uff1a",
+    "",
+    "\u9280\u884c\u540d\u7a31\uff0b\u4ee3\u78bc / \u5e33\u865f",
+    "",
+    "\u4f8b\u5982\uff1a",
+    "\u53f0\u65b0812 / 123456789"
   ].join("\n");
 }
 

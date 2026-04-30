@@ -32,6 +32,7 @@ import {
 } from "@/lib/commands/pending";
 import {
   formatPaymentSummary,
+  getBankAccountInvalidPrompt,
   getBankAccountPrompt,
   getLinePayInvalidChoiceText,
   getLinePayPrompt,
@@ -1605,6 +1606,10 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
   }
 
   if (step === PAYMENT_SETUP_STEPS.awaitingBankInfo) {
+    if (!normalized.includes("/")) {
+      return getBankAccountInvalidPrompt();
+    }
+
     const finalDraft = defaultPaymentSetupDraft({
       ...draft,
       acceptBankTransfer: true,
