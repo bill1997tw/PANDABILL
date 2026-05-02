@@ -1572,7 +1572,7 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
 
   if (normalized === "取消") {
     await updateLineUserProfileDraft(lineUserId, null, null);
-    return "Setup cancelled.";
+    return "已取消設定。";
   }
 
   if (step === PAYMENT_SETUP_STEPS.awaitingMethodChoice) {
