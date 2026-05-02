@@ -206,10 +206,10 @@ function getAwaitingExpensePrompt() {
     "或",
     "",
     "飲料185",
-    "周永豪付",
-    "100陳彥廷",
-    "50張祥豪",
-    "35周永濠"
+    "小明付",
+    "100小華",
+    "50小美",
+    "35小陳"
   ].join("\n");
 }
 
@@ -1230,7 +1230,7 @@ async function handleExpenseDraftStart(event: LineMessageEvent) {
     ttlMinutes: 5
   });
 
-  return `已記下：${header.title} ${header.amount}\n請再輸入付款人，例如：周永豪付`;
+  return `已記下：${header.title} ${header.amount}\n請再輸入付款人，例如：小明付`;
 }
 
 async function startAwaitingExpenseInput(event: LineMessageEvent) {
@@ -1315,7 +1315,7 @@ async function handleExpenseDraftContinuation(
   }
 
   if (!changed) {
-    return "看不懂這段支出細項，請改成像「周永豪付」或「100陳彥廷」這樣的格式。";
+    return "看不懂這段支出細項，請改成像「小明付」或「100小華」這樣的格式。";
   }
 
   const totalCents = parseAmountToCents(updatedDraft.amount);
@@ -1355,10 +1355,10 @@ async function handleExpenseDraftContinuation(
   });
 
   if (!updatedDraft.payerName) {
-    return `已記下：${updatedDraft.title} ${updatedDraft.amount}\n請再輸入付款人，例如：周永豪付`;
+    return `已記下：${updatedDraft.title} ${updatedDraft.amount}\n請再輸入付款人，例如：小明付`;
   }
 
-  return `目前細項加總：${formatAmountForDisplay(shareTotalCents)} / ${formatAmountForDisplay(totalCents)}\n請繼續輸入下一位，例如：50張祥豪`;
+  return `目前細項加總：${formatAmountForDisplay(shareTotalCents)} / ${formatAmountForDisplay(totalCents)}\n請繼續輸入下一位，例如：50小美`;
 }
 
 async function handleRecentExpenses(event: LineMessageEvent) {
