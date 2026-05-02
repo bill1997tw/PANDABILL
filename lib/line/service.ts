@@ -35,11 +35,11 @@ import {
   formatPaymentSummary,
   getBankAccountInvalidPrompt,
   getBankAccountPrompt,
-  getLinePayInvalidChoiceText,
-  getLinePayPrompt,
   getOtherPaymentPrompt,
   getPaymentNotePrompt,
-  getPaymentSetupMenuText
+  getPaymentSelectionInvalidText,
+  getPaymentSetupMenuText,
+  parsePaymentSelectionInput
 } from "@/lib/commands/payment";
 import { getCollectingMemberUpdateText } from "@/lib/commands/participant-roster";
 import { getMvpText, getSettlementSummaryText } from "@/lib/commands/settlement";
@@ -414,46 +414,6 @@ function parseBooleanChoice(text: string) {
   return null;
 }
 
-function parsePaymentMenuChoice(text: string) {
-  const normalized = text.trim();
-
-  if (normalized === "1") {
-    return "bank";
-  }
-
-  if (normalized === "2") {
-    return "linepay";
-  }
-
-  if (normalized === "3") {
-    return "cash";
-  }
-
-  if (normalized === "4") {
-    return "other";
-  }
-
-  if (normalized === "5") {
-    return "note";
-  }
-
-  return null;
-}
-
-function parseStrictYesNo(text: string) {
-  const normalized = text.trim();
-
-  if (normalized === "是") {
-    return true;
-  }
-
-  if (normalized === "否") {
-    return false;
-  }
-
-  return null;
-}
-
 async function savePaymentSetup(
   lineUserId: string,
   draft: PaymentSetupDraft
@@ -482,6 +442,50 @@ async function savePaymentSetup(
     acceptCash: draft.acceptCash,
     paymentNote: draft.paymentNote
   });
+}
+
+async function continuePaymentSetup(
+  lineUserId: string,
+  draft: PaymentSetupDraft
+) {
+  const [nextSelection, ...remainingSelections] = draft.pendingSelections;
+  const nextDraft = defaultPaymentSetupDraft({
+    ...draft,
+    pendingSelections: remainingSelections
+  });
+
+  if (!nextSelection) {
+    return savePaymentSetup(lineUserId, nextDraft);
+  }
+
+  if (nextSelection === 1) {
+    await updateLineUserProfileDraft(
+      lineUserId,
+      PAYMENT_SETUP_STEPS.awaitingBankInfo,
+      nextDraft
+    );
+    return getBankAccountPrompt();
+  }
+
+  if (nextSelection === 4) {
+    await updateLineUserProfileDraft(
+      lineUserId,
+      PAYMENT_SETUP_STEPS.awaitingOtherMethod,
+      nextDraft
+    );
+    return getOtherPaymentPrompt();
+  }
+
+  if (nextSelection === 5) {
+    await updateLineUserProfileDraft(
+      lineUserId,
+      PAYMENT_SETUP_STEPS.awaitingNote,
+      nextDraft
+    );
+    return getPaymentNotePrompt();
+  }
+
+  return savePaymentSetup(lineUserId, nextDraft);
 }
 
 async function startAwaitingActivityName(input: {
@@ -1568,62 +1572,32 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
 
   if (normalized === "取消") {
     await updateLineUserProfileDraft(lineUserId, null, null);
-    return "已取消設定。";
+    return "Setup cancelled.";
   }
 
   if (step === PAYMENT_SETUP_STEPS.awaitingMethodChoice) {
-    const choice = parsePaymentMenuChoice(normalized);
+    const selection = parsePaymentSelectionInput(normalized);
 
-    if (!choice) {
-      return getPaymentSetupMenuText();
+    if (!selection.ok) {
+      return getPaymentSelectionInvalidText();
     }
 
-    if (choice === "bank") {
-      await updateLineUserProfileDraft(
-        lineUserId,
-        PAYMENT_SETUP_STEPS.awaitingBankInfo,
-        draft
-      );
-      return getBankAccountPrompt();
-    }
-
-    if (choice === "linepay") {
-      await updateLineUserProfileDraft(
-        lineUserId,
-        PAYMENT_SETUP_STEPS.awaitingLinePayChoice,
-        draft
-      );
-      return getLinePayPrompt();
-    }
-
-    if (choice === "cash") {
-      const finalDraft = defaultPaymentSetupDraft({
-        ...draft,
-        acceptBankTransfer: false,
-        bankName: "現金",
-        bankAccount: null,
-        acceptLinePay: false,
-        acceptCash: true
-      });
-
-      return savePaymentSetup(lineUserId, finalDraft);
-    }
-
-    if (choice === "other") {
-      await updateLineUserProfileDraft(
-        lineUserId,
-        PAYMENT_SETUP_STEPS.awaitingOtherMethod,
-        draft
-      );
-      return getOtherPaymentPrompt();
-    }
-
-    await updateLineUserProfileDraft(
-      lineUserId,
-      PAYMENT_SETUP_STEPS.awaitingNote,
-      draft
+    const selectedRequiringInput = selection.selections.filter(
+      (value) => value === 1 || value === 4 || value === 5
     );
-    return getPaymentNotePrompt();
+
+    const nextDraft = defaultPaymentSetupDraft({
+      ...draft,
+      acceptLinePay: draft.acceptLinePay || selection.selections.includes(2),
+      acceptCash: draft.acceptCash || selection.selections.includes(3),
+      bankName:
+        draft.acceptCash || selection.selections.includes(3)
+          ? draft.bankName ?? "Cash"
+          : draft.bankName,
+      pendingSelections: selectedRequiringInput
+    });
+
+    return continuePaymentSetup(lineUserId, nextDraft);
   }
 
   if (step === PAYMENT_SETUP_STEPS.awaitingBankInfo) {
@@ -1631,61 +1605,34 @@ async function handlePaymentSetupResponse(lineUserId: string, text: string) {
       return getBankAccountInvalidPrompt();
     }
 
-    const finalDraft = defaultPaymentSetupDraft({
+    const nextDraft = defaultPaymentSetupDraft({
       ...draft,
       acceptBankTransfer: true,
       bankName: "銀行帳戶",
       bankAccount: normalized,
-      acceptLinePay: false,
-      acceptCash: false
     });
 
-    return savePaymentSetup(lineUserId, finalDraft);
-  }
-
-  if (step === PAYMENT_SETUP_STEPS.awaitingLinePayChoice) {
-    const answer = parseStrictYesNo(normalized);
-    if (answer === null) {
-      return getLinePayInvalidChoiceText();
-    }
-
-    if (!answer) {
-      await updateLineUserProfileDraft(lineUserId, null, null);
-      return "已取消 LINE Pay 設定。";
-    }
-
-    const finalDraft = defaultPaymentSetupDraft({
-      ...draft,
-      acceptBankTransfer: false,
-      bankName: null,
-      bankAccount: null,
-      acceptLinePay: true,
-      acceptCash: false
-    });
-
-    return savePaymentSetup(lineUserId, finalDraft);
+    return continuePaymentSetup(lineUserId, nextDraft);
   }
 
   if (step === PAYMENT_SETUP_STEPS.awaitingOtherMethod) {
-    const finalDraft = defaultPaymentSetupDraft({
+    const nextDraft = defaultPaymentSetupDraft({
       ...draft,
       acceptBankTransfer: true,
-      bankName: "其他",
+      bankName: "Other",
       bankAccount: normalized,
-      acceptLinePay: false,
-      acceptCash: false
     });
 
-    return savePaymentSetup(lineUserId, finalDraft);
+    return continuePaymentSetup(lineUserId, nextDraft);
   }
 
   if (step === PAYMENT_SETUP_STEPS.awaitingNote) {
-    const finalDraft = defaultPaymentSetupDraft({
+    const nextDraft = defaultPaymentSetupDraft({
       ...draft,
       paymentNote: normalized
     });
 
-    return savePaymentSetup(lineUserId, finalDraft);
+    return continuePaymentSetup(lineUserId, nextDraft);
   }
 
   return null;

@@ -3,11 +3,10 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 
 export const PAYMENT_SETUP_STEPS = {
-  awaitingMethodChoice: "awaiting_method_choice",
-  awaitingBankInfo: "awaiting_bank_info",
-  awaitingLinePayChoice: "awaiting_linepay_choice",
-  awaitingOtherMethod: "awaiting_other_method",
-  awaitingNote: "awaiting_note"
+  awaitingMethodChoice: "waiting_payment_selection",
+  awaitingBankInfo: "waiting_bank_info",
+  awaitingOtherMethod: "waiting_other_payment",
+  awaitingNote: "waiting_remark"
 } as const;
 
 export type PaymentSetupStep =
@@ -21,6 +20,7 @@ export type PaymentSetupDraft = {
   acceptLinePay: boolean;
   acceptCash: boolean;
   paymentNote: string | null;
+  pendingSelections: number[];
 };
 
 type LineUserProfileRecord = {
@@ -45,7 +45,8 @@ export function defaultPaymentSetupDraft(
     bankAccount: profile?.bankAccount ?? null,
     acceptLinePay: profile?.acceptLinePay ?? false,
     acceptCash: profile?.acceptCash ?? false,
-    paymentNote: profile?.paymentNote ?? null
+    paymentNote: profile?.paymentNote ?? null,
+    pendingSelections: profile?.pendingSelections ?? []
   };
 }
 
@@ -71,7 +72,12 @@ export function parsePaymentSetupDraft(value: Prisma.JsonValue | null | undefine
     acceptCash:
       typeof candidate.acceptCash === "boolean" ? candidate.acceptCash : false,
     paymentNote:
-      typeof candidate.paymentNote === "string" ? candidate.paymentNote : null
+      typeof candidate.paymentNote === "string" ? candidate.paymentNote : null,
+    pendingSelections: Array.isArray(candidate.pendingSelections)
+      ? candidate.pendingSelections.filter(
+          (value): value is number => typeof value === "number"
+        )
+      : []
   });
 }
 
@@ -85,7 +91,8 @@ export function serializePaymentSetupDraft(
     bankAccount: draft.bankAccount,
     acceptLinePay: draft.acceptLinePay,
     acceptCash: draft.acceptCash,
-    paymentNote: draft.paymentNote
+    paymentNote: draft.paymentNote,
+    pendingSelections: draft.pendingSelections
   };
 }
 
@@ -94,15 +101,13 @@ function normalizePersistedProfile(profile: LineUserProfileRecord | null) {
     return defaultPaymentSetupDraft();
   }
 
-  const hasExplicitCash = profile.acceptCash && profile.bankName === "現金";
-
   return defaultPaymentSetupDraft({
     memberName: profile.memberName,
     acceptBankTransfer: profile.acceptBankTransfer,
     bankName: profile.bankName,
     bankAccount: profile.bankAccount,
     acceptLinePay: profile.acceptLinePay,
-    acceptCash: hasExplicitCash,
+    acceptCash: profile.acceptCash,
     paymentNote: profile.paymentNote
   });
 }
@@ -118,7 +123,8 @@ export function getCurrentPaymentDraft(profile: LineUserProfileRecord | null) {
     bankAccount: draft.bankAccount ?? persisted.bankAccount,
     acceptLinePay: draft.acceptLinePay || persisted.acceptLinePay,
     acceptCash: draft.acceptCash || persisted.acceptCash,
-    paymentNote: draft.paymentNote ?? persisted.paymentNote
+    paymentNote: draft.paymentNote ?? persisted.paymentNote,
+    pendingSelections: draft.pendingSelections
   });
 }
 
