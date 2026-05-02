@@ -10,6 +10,7 @@ import {
   parseExpenseDraftHeader,
   parseExpensePayerLine,
   parseExpenseShareLine,
+  parseNaturalExpense,
   splitMultilineSegments
 } from "@/lib/commands/expense";
 import {
@@ -212,6 +213,10 @@ function getAwaitingExpensePrompt() {
   ].join("\n");
 }
 
+function getAwaitingExpenseInvalidPrompt() {
+  return ["格式不正確，請重新輸入。", "", "例如：", "晚餐600我付"].join("\n");
+}
+
 function getAwaitingActivityCancelledPrompt() {
   return "已取消建立活動";
 }
@@ -363,6 +368,22 @@ function shouldStartExpenseDraft(rawText: string, parsed: ParsedLineCommand) {
   }
 
   return Boolean(parseExpenseDraftHeader(rawText));
+}
+
+function parseExplicitExpenseWhileAwaiting(rawText: string) {
+  if (!rawText || rawText.length > 100) {
+    return null;
+  }
+
+  if (isUrlLikeText(rawText)) {
+    return null;
+  }
+
+  if (!/\d/.test(rawText) || !rawText.includes("付")) {
+    return null;
+  }
+
+  return parseNaturalExpense(rawText);
 }
 
 function getExpenseNotAllowedText() {
@@ -2033,7 +2054,8 @@ async function handleMessageEvent(event: LineMessageEvent) {
           return multilineExpenseReply;
         }
 
-        if (parsed.kind === "expense") {
+        const explicitExpense = parseExplicitExpenseWhileAwaiting(rawText);
+        if (explicitExpense) {
           await clearPendingAction({
             chatId,
             requesterLineUserId: lineUserId,
@@ -2041,14 +2063,14 @@ async function handleMessageEvent(event: LineMessageEvent) {
           });
           return finalizeEqualExpense({
             event,
-            title: parsed.title,
-            amount: parsed.amount,
-            payerName: parsed.payerName,
-            payerIsSender: parsed.payerIsSender
+            title: explicitExpense.title,
+            amount: explicitExpense.amount,
+            payerName: explicitExpense.payerName,
+            payerIsSender: explicitExpense.payerIsSender
           });
         }
 
-        return getAwaitingExpensePrompt();
+        return getAwaitingExpenseInvalidPrompt();
       }
 
       if (
@@ -2060,8 +2082,6 @@ async function handleMessageEvent(event: LineMessageEvent) {
       ) {
         return handleExpenseDraftContinuation(event, pendingExpenseState.pending);
       }
-    } else if (pendingExpenseState.expired && parsed.kind === "ignored" && rawText) {
-      return getAwaitingExpenseExpiredPrompt();
     }
   }
 
@@ -2089,18 +2109,6 @@ async function handleMessageEvent(event: LineMessageEvent) {
 
     if (!isGroupWhitelistedCommand(parsed)) {
       return null;
-    }
-  } else {
-    const multilineExpenseReply = await handleImmediateMultilineExpense(event);
-    if (multilineExpenseReply) {
-      return multilineExpenseReply;
-    }
-
-    if (parsed.kind === "expense" && shouldStartExpenseDraft(rawText, parsed)) {
-      const draftReply = await handleExpenseDraftStart(event);
-      if (draftReply) {
-        return draftReply;
-      }
     }
   }
 

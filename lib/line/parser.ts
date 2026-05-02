@@ -1,4 +1,3 @@
-import { parseNaturalExpense } from "@/lib/commands/expense";
 import type { ParsedLineCommand } from "@/lib/line/types";
 
 function normalize(text: string) {
@@ -178,17 +177,6 @@ export function parseLineCommand(text: string): ParsedLineCommand {
   const shortcut = parseShortcut(normalized);
   if (shortcut) {
     return shortcut;
-  }
-
-  const parsedExpense = parseNaturalExpense(text.trim());
-  if (parsedExpense) {
-    return {
-      kind: "expense",
-      title: parsedExpense.title,
-      amount: parsedExpense.amount,
-      payerName: parsedExpense.payerName,
-      payerIsSender: parsedExpense.payerIsSender
-    };
   }
 
   return { kind: "ignored" };
