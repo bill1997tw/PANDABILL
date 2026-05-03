@@ -9,6 +9,12 @@ import type { LineWebhookBody } from "@/lib/line/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const SAFE_LINE_ERROR_REPLY = "小二暫時連線不穩，請稍後再試。";
+
+async function safeReplyDatabaseError(replyToken: string) {
+  await replyLineText(replyToken, SAFE_LINE_ERROR_REPLY);
+}
+
 export async function GET() {
   return NextResponse.json({
     ok: true,
@@ -27,12 +33,7 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("LINE webhook signature verification failed", error);
 
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Webhook verification failed."
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Webhook verification failed." }, { status: 500 });
   }
 
   let payload: LineWebhookBody;
@@ -68,10 +69,7 @@ export async function POST(request: Request) {
         });
 
         try {
-          await replyLineText(
-            event.replyToken,
-            error instanceof Error ? `處理失敗：${error.message}` : "處理訊息時發生錯誤。"
-          );
+          await safeReplyDatabaseError(event.replyToken);
         } catch (replyError) {
           console.error("LINE fallback reply failed", replyError);
         }
