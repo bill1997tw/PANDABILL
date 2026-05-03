@@ -144,10 +144,30 @@ function isGroupWhitelistedCommand(parsed: ParsedLineCommand) {
     case "cancel":
     case "settlement":
     case "mvp":
+    case "list-ledgers":
+    case "list-archived-ledgers":
       return true;
     default:
       return false;
   }
+}
+
+function mapGroupFallbackCommand(rawText: string, parsed: ParsedLineCommand): ParsedLineCommand {
+  if (parsed.kind !== "ignored") {
+    return parsed;
+  }
+
+  const normalized = rawText.trim();
+
+  if (normalized === "查看封存帳本") {
+    return { kind: "list-archived-ledgers" };
+  }
+
+  if (normalized === "查看帳本" || normalized === "帳本" || normalized === "帳本列表") {
+    return { kind: "list-ledgers" };
+  }
+
+  return parsed;
 }
 
 function formatAmountForDisplay(cents: number) {
@@ -1919,6 +1939,7 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
       });
 
     default:
+      console.error(`Command recognized but no handler found: ${command.kind}`);
       return null;
   }
 }
@@ -1947,7 +1968,7 @@ async function handleMessageEvent(event: LineMessageEvent) {
   if (chatType !== "user" && isUrlLikeText(rawText)) {
     return null;
   }
-  const parsed = parseLineCommand(event.message.text);
+  const parsed = mapGroupFallbackCommand(rawText, parseLineCommand(event.message.text));
 
   if (lineUserId) {
     const pendingActivityState = await getPendingActionState({
