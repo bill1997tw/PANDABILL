@@ -19,7 +19,7 @@ export function getXiaoerMenuText() {
 
 export function getSettlementMenuText() {
   return [
-    "請選擇算帳功能：",
+    "好勒~ 以下是小二能幫大人做的",
     "",
     "1. 查看目前結算",
     "2. 帳本結算",
