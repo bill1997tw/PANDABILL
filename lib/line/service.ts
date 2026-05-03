@@ -245,6 +245,37 @@ function getAwaitingActivityCancelledPrompt() {
   return "已取消建立活動";
 }
 
+function getContinuousExpensePrompt() {
+  return [
+    "請輸入支出內容，可一次輸入多筆：",
+    "",
+    "例如：",
+    "晚餐500我付",
+    "飲料200我付",
+    "胡椒餅90小明付",
+    "",
+    "輸入【完成】結束新增支出。"
+  ].join("\n");
+}
+
+function getContinuousExpenseInvalidPrompt() {
+  return ["格式不正確，請重新輸入。", "", "例如：", "晚餐600我付"].join("\n");
+}
+
+function getContinuousExpenseSavedPrompt(count: number) {
+  return count === 1
+    ? "已新增 1 筆支出。\n目前可繼續輸入下一筆，或輸入【完成】結束。"
+    : `已新增 ${count} 筆支出。`;
+}
+
+function getContinuousExpenseContinuePrompt() {
+  return "你可以繼續輸入支出，或輸入【完成】結束。";
+}
+
+function isContinuousExpenseCompleteCommand(text: string) {
+  return text === "完成" || text === "結束";
+}
+
 function getChatContext(source: LineEvent["source"]) {
   if (source.type === "group" && source.groupId) {
     return {
@@ -1055,6 +1086,171 @@ function resolveCustomShares(input: {
   };
 }
 
+async function buildCurrentSettlementText(groupId: string) {
+  const snapshot = await getSettlementSnapshot(groupId);
+
+  if (!snapshot?.activeLedger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (!snapshot.summary.settlement.length) {
+    return getNoFormalSettlementText();
+  }
+
+  return buildSettlementBlock(
+    snapshot.summary.settlement.map(
+      (item) => `${item.fromName} → ${item.toName} ${item.amountDisplay}`
+    )
+  );
+}
+
+async function keepContinuousExpenseModeActive(input: {
+  groupId: string;
+  chatId: string;
+  requesterLineUserId: string;
+  payload?: Prisma.InputJsonValue | null;
+}) {
+  await createPendingAction({
+    groupId: input.groupId,
+    chatId: input.chatId,
+    requesterLineUserId: input.requesterLineUserId,
+    actionType: AWAITING_EXPENSE_DETAILS_ACTION,
+    payload: input.payload ?? null,
+    ttlMinutes: 10
+  });
+}
+
+function describeExpenseLineFailure(line: string) {
+  const normalized = line.trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (isUrlLikeText(normalized)) {
+    return "看起來像網址";
+  }
+
+  if (normalized.length > 100) {
+    return "內容過長";
+  }
+
+  if (!/\d/.test(normalized)) {
+    return "缺少金額";
+  }
+
+  if (!/付/.test(normalized)) {
+    return "缺少付款人";
+  }
+
+  return "格式不正確";
+}
+
+async function createEqualExpenseEntry(input: {
+  event: LineMessageEvent;
+  title: string;
+  amount: string;
+  payerName?: string;
+  payerIsSender?: boolean;
+}) {
+  const { chatType, lineUserId } = getChatContext(input.event.source);
+
+  if (chatType === "user") {
+    return {
+      ok: false as const,
+      message: getGroupOnlyMessage()
+    };
+  }
+
+  const binding = await getOrCreateGroupContext(input.event.source);
+  if (!binding) {
+    return {
+      ok: false as const,
+      message: getMissingGroupContextMessage()
+    };
+  }
+
+  const confirmed = await getConfirmedMemberIdsForActiveLedger(binding.group.id);
+
+  if (!confirmed.ledger) {
+    return {
+      ok: false as const,
+      message: getNoActiveLedgerText()
+    };
+  }
+
+  if (confirmed.ledger.isCollectingMembers) {
+    return {
+      ok: false as const,
+      message: getExpenseNotAllowedText()
+    };
+  }
+
+  const actorDisplayName = await resolveActorDisplayName(input.event);
+  const payer = resolvePayerParticipant({
+    participants: confirmed.participants,
+    actorDisplayName,
+    payerName: input.payerName,
+    payerIsSender: input.payerIsSender,
+    lineUserId
+  });
+
+  if (!payer) {
+    return {
+      ok: false as const,
+      message: getMissingPayerText(input.payerName ?? actorDisplayName)
+    };
+  }
+
+  const created = await createExpenseInGroup({
+    groupId: binding.group.id,
+    title: input.title,
+    amount: input.amount,
+    payerId: payer.memberId,
+    participantIds: confirmed.memberIds
+  });
+
+  const amountCents = parseAmountToCents(input.amount);
+  const shareCents =
+    created.expense.participants[0]?.shareCents ??
+    Math.round(amountCents / confirmed.memberIds.length);
+
+  return {
+    ok: true as const,
+    groupId: binding.group.id,
+    title: input.title,
+    amountCents,
+    payerDisplayName: payer.displayName,
+    participantCount: created.expense.participants.length,
+    shareCents
+  };
+}
+
+async function createAndFormatEqualExpense(input: {
+  event: LineMessageEvent;
+  title: string;
+  amount: string;
+  payerName?: string;
+  payerIsSender?: boolean;
+}) {
+  const created = await createEqualExpenseEntry(input);
+
+  if (!created.ok) {
+    return created.message;
+  }
+
+  const settlementText = await buildCurrentSettlementText(created.groupId);
+
+  return [
+    `已新增支出：${input.title} ${formatAmountForDisplay(created.amountCents)}`,
+    "",
+    `付款人：${created.payerDisplayName}`,
+    `平均分攤：${created.participantCount}人，每人${formatAmountForDisplay(created.shareCents)}`,
+    "",
+    settlementText
+  ].join("\n");
+}
+
 async function finalizeEqualExpense(input: {
   event: LineMessageEvent;
   title: string;
@@ -1244,6 +1440,94 @@ async function handleImmediateMultilineExpense(event: LineMessageEvent) {
   });
 }
 
+async function handleBatchEqualExpenses(event: LineMessageEvent) {
+  const lines = splitMultilineSegments(event.message.text);
+
+  if (lines.length === 0) {
+    return null;
+  }
+
+  const successes: Array<{
+    title: string;
+    amountCents: number;
+    payerDisplayName: string;
+  }> = [];
+  const failures: string[] = [];
+  let groupId: string | null = null;
+
+  for (const line of lines) {
+    const explicitExpense = parseExplicitExpenseWhileAwaiting(line);
+
+    if (!explicitExpense) {
+      const reason = describeExpenseLineFailure(line) ?? "格式不正確";
+      failures.push(`- ${line}：${reason}`);
+      continue;
+    }
+
+    const created = await createEqualExpenseEntry({
+      event,
+      title: explicitExpense.title,
+      amount: explicitExpense.amount,
+      payerName: explicitExpense.payerName,
+      payerIsSender: explicitExpense.payerIsSender
+    });
+
+    if (!created.ok) {
+      if (successes.length === 0) {
+        return created.message;
+      }
+
+      failures.push(`- ${line}：${created.message}`);
+      continue;
+    }
+
+    groupId = created.groupId;
+    successes.push({
+      title: created.title,
+      amountCents: created.amountCents,
+      payerDisplayName: created.payerDisplayName
+    });
+  }
+
+  if (successes.length === 0) {
+    return failures.length > 0 ? [getContinuousExpenseInvalidPrompt(), "", ...failures].join("\n") : null;
+  }
+
+  if (successes.length === 1 && failures.length === 0 && groupId) {
+    const settlementText = await buildCurrentSettlementText(groupId);
+    return [
+      getContinuousExpenseSavedPrompt(1),
+      "",
+      settlementText
+    ].join("\n");
+  }
+
+  const linesForReply: string[] = [
+    `已新增 ${successes.length} 筆支出：`,
+    "",
+    ...successes.map(
+      (item, index) =>
+        `${index + 1}. ${item.title} ${formatAmountForDisplay(item.amountCents)}｜${item.payerDisplayName}付`
+    )
+  ];
+
+  if (failures.length > 0) {
+    linesForReply.push(
+      "",
+      "以下項目未新增，請確認格式：",
+      "",
+      ...failures,
+      "",
+      "請重新輸入錯誤的項目，或輸入【完成】結束。"
+    );
+  } else if (groupId) {
+    const settlementText = await buildCurrentSettlementText(groupId);
+    linesForReply.push("", settlementText, "", getContinuousExpenseContinuePrompt());
+  }
+
+  return linesForReply.join("\n");
+}
+
 async function handleExpenseDraftStart(event: LineMessageEvent) {
   const { chatType, chatId, lineUserId } = getChatContext(event.source);
 
@@ -1280,7 +1564,7 @@ async function handleExpenseDraftStart(event: LineMessageEvent) {
     requesterLineUserId: lineUserId,
     actionType: AWAITING_EXPENSE_DETAILS_ACTION,
     payload: serializeExpenseDraftPayload(buildExpenseDraft(header.title, header.amount)),
-    ttlMinutes: 5
+    ttlMinutes: 10
   });
 
   return `已記下：${header.title} ${header.amount}\n請再輸入付款人，例如：小明付`;
@@ -1317,10 +1601,10 @@ async function startAwaitingExpenseInput(event: LineMessageEvent) {
     requesterLineUserId: lineUserId,
     actionType: AWAITING_EXPENSE_DETAILS_ACTION,
     payload: null,
-    ttlMinutes: 5
+    ttlMinutes: 10
   });
 
-  return withQuickReply(getAwaitingExpensePrompt(), buildExpenseQuickReply());
+  return withQuickReply(getContinuousExpensePrompt(), buildExpenseQuickReply());
 }
 
 async function handleExpenseDraftContinuation(
@@ -1378,33 +1662,34 @@ async function handleExpenseDraftContinuation(
   );
 
   if (shareTotalCents > totalCents) {
-    await clearPendingAction({
+    await keepContinuousExpenseModeActive({
+      groupId: pending.groupId,
       chatId,
       requesterLineUserId: lineUserId,
-      actionType: AWAITING_EXPENSE_DETAILS_ACTION
+      payload: null
     });
-    return buildExpenseMismatchText(totalCents, shareTotalCents);
+    return [buildExpenseMismatchText(totalCents, shareTotalCents), "", getContinuousExpenseContinuePrompt()].join("\n");
   }
 
   if (updatedDraft.payerName && shareTotalCents === totalCents) {
-    await clearPendingAction({
-      chatId,
-      requesterLineUserId: lineUserId,
-      actionType: AWAITING_EXPENSE_DETAILS_ACTION
-    });
-    return finalizeCustomExpense({
+    const reply = await finalizeCustomExpense({
       event,
       draft: updatedDraft
     });
+    await keepContinuousExpenseModeActive({
+      groupId: pending.groupId,
+      chatId,
+      requesterLineUserId: lineUserId,
+      payload: null
+    });
+    return [reply, "", getContinuousExpenseContinuePrompt()].join("\n");
   }
 
-  await createPendingAction({
+  await keepContinuousExpenseModeActive({
     groupId: pending.groupId,
     chatId,
     requesterLineUserId: lineUserId,
-    actionType: AWAITING_EXPENSE_DETAILS_ACTION,
-    payload: serializeExpenseDraftPayload(updatedDraft),
-    ttlMinutes: 5
+    payload: serializeExpenseDraftPayload(updatedDraft)
   });
 
   if (!updatedDraft.payerName) {
@@ -1970,7 +2255,7 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
       return "現在不需要手動綁定群組，直接用「建立活動」就可以開始。";
 
     case "expense":
-      return finalizeEqualExpense({
+      return createAndFormatEqualExpense({
         event,
         title: command.title,
         amount: command.amount,
@@ -2005,9 +2290,6 @@ async function handleMessageEvent(event: LineMessageEvent) {
   }
 
   const rawText = event.message.text.trim();
-  if (chatType !== "user" && isUrlLikeText(rawText)) {
-    return null;
-  }
   const parsed = mapGroupFallbackCommand(rawText, parseLineCommand(event.message.text));
 
   if (lineUserId) {
@@ -2051,34 +2333,46 @@ async function handleMessageEvent(event: LineMessageEvent) {
         return getAwaitingExpenseCancelledPrompt();
       }
 
+      if (isContinuousExpenseCompleteCommand(rawText)) {
+        await clearPendingAction({
+          chatId,
+          requesterLineUserId: lineUserId,
+          actionType: AWAITING_EXPENSE_DETAILS_ACTION
+        });
+
+        const binding = await getOrCreateGroupContext(event.source);
+        if (!binding) {
+          return getMissingGroupContextMessage();
+        }
+
+        const settlementText = await buildCurrentSettlementText(binding.group.id);
+        return ["已結束新增支出。", "", settlementText].join("\n");
+      }
+
       if (!pendingExpenseState.pending.payload) {
         const multilineExpenseReply = await handleImmediateMultilineExpense(event);
         if (multilineExpenseReply) {
-          await clearPendingAction({
+          await keepContinuousExpenseModeActive({
+            groupId: pendingExpenseState.pending.groupId,
             chatId,
             requesterLineUserId: lineUserId,
-            actionType: AWAITING_EXPENSE_DETAILS_ACTION
+            payload: null
           });
-          return multilineExpenseReply;
+          return [multilineExpenseReply, "", getContinuousExpenseContinuePrompt()].join("\n");
         }
 
-        const explicitExpense = parseExplicitExpenseWhileAwaiting(rawText);
-        if (explicitExpense) {
-          await clearPendingAction({
+        const batchExpenseReply = await handleBatchEqualExpenses(event);
+        if (batchExpenseReply) {
+          await keepContinuousExpenseModeActive({
+            groupId: pendingExpenseState.pending.groupId,
             chatId,
             requesterLineUserId: lineUserId,
-            actionType: AWAITING_EXPENSE_DETAILS_ACTION
+            payload: null
           });
-          return finalizeEqualExpense({
-            event,
-            title: explicitExpense.title,
-            amount: explicitExpense.amount,
-            payerName: explicitExpense.payerName,
-            payerIsSender: explicitExpense.payerIsSender
-          });
+          return batchExpenseReply;
         }
 
-        return getAwaitingExpenseInvalidPrompt();
+        return getContinuousExpenseInvalidPrompt();
       }
 
       if (
