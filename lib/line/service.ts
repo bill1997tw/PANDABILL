@@ -96,6 +96,8 @@ import type { LineEvent, LineJoinLikeEvent, LineMessageEvent, ParsedLineCommand 
 
 const AWAITING_ACTIVITY_NAME_ACTION = PendingActionType.awaiting_activity_name;
 const AWAITING_EXPENSE_DETAILS_ACTION = PendingActionType.awaiting_expense_details;
+const JOIN_LEAVE_SELECTION_TTL_MS = 5 * 60 * 1000;
+const joinLeaveSelectionState = new Map<string, number>();
 
 type PendingExpenseDraft = {
   title: string;
@@ -111,6 +113,47 @@ type PendingExpenseDraft = {
 type ConfirmedParticipantRef = Awaited<
   ReturnType<typeof getConfirmedMemberIdsForActiveLedger>
 >["participants"][number];
+
+function getJoinLeaveSelectionStateKey(chatId: string, lineUserId?: string) {
+  return lineUserId ? `${chatId}:${lineUserId}` : null;
+}
+
+function activateJoinLeaveSelectionState(chatId: string, lineUserId?: string) {
+  const key = getJoinLeaveSelectionStateKey(chatId, lineUserId);
+  if (!key) {
+    return;
+  }
+
+  joinLeaveSelectionState.set(key, Date.now() + JOIN_LEAVE_SELECTION_TTL_MS);
+}
+
+function clearJoinLeaveSelectionState(chatId: string, lineUserId?: string) {
+  const key = getJoinLeaveSelectionStateKey(chatId, lineUserId);
+  if (!key) {
+    return;
+  }
+
+  joinLeaveSelectionState.delete(key);
+}
+
+function hasActiveJoinLeaveSelectionState(chatId: string, lineUserId?: string) {
+  const key = getJoinLeaveSelectionStateKey(chatId, lineUserId);
+  if (!key) {
+    return false;
+  }
+
+  const expiresAt = joinLeaveSelectionState.get(key);
+  if (!expiresAt) {
+    return false;
+  }
+
+  if (expiresAt < Date.now()) {
+    joinLeaveSelectionState.delete(key);
+    return false;
+  }
+
+  return true;
+}
 
 function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextReplyPayload {
   if (!quickReply) {
@@ -159,6 +202,10 @@ function mapGroupFallbackCommand(rawText: string, parsed: ParsedLineCommand): Pa
 
   const normalized = rawText.trim();
 
+  if (normalized === "加入活動") {
+    return { kind: "join-activity" };
+  }
+
   if (normalized === "查看封存帳本") {
     return { kind: "list-archived-ledgers" };
   }
@@ -184,6 +231,10 @@ function getNoFormalSettlementText() {
 
 function getGroupOnlyMessage() {
   return "請在群組裡使用這個功能。";
+}
+
+function getNoActiveJoinLeaveLedgerText() {
+  return "目前沒有進行中的活動，請先建立活動。";
 }
 
 function getMissingLineIdentityMessage() {
@@ -274,6 +325,14 @@ function getContinuousExpenseContinuePrompt() {
 
 function isContinuousExpenseCompleteCommand(text: string) {
   return text === "完成" || text === "結束";
+}
+
+function isJoinSelectionText(text: string) {
+  return text === "+" || text === "+1" || text === "加入";
+}
+
+function isLeaveSelectionText(text: string) {
+  return text === "-" || text === "-1" || text === "退出";
 }
 
 function getChatContext(source: LineEvent["source"]) {
@@ -654,7 +713,7 @@ async function handleJoinOrLeaveWithRoster(
   event: LineMessageEvent,
   action: "join" | "leave"
 ) {
-  const { chatType } = getChatContext(event.source);
+  const { chatType, chatId, lineUserId } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -665,7 +724,6 @@ async function handleJoinOrLeaveWithRoster(
     return getMissingGroupContextMessage();
   }
 
-  const { lineUserId } = getChatContext(event.source);
   const displayName = await resolveActorDisplayName(event);
   const result =
     action === "join"
@@ -689,6 +747,7 @@ async function handleJoinOrLeaveWithRoster(
   }
 
   if (result.status === "already-joined") {
+    clearJoinLeaveSelectionState(chatId, lineUserId);
     return getCollectingMemberUpdateText({
       type: "already-joined",
       actorName: displayName,
@@ -697,6 +756,7 @@ async function handleJoinOrLeaveWithRoster(
   }
 
   if (result.status === "not-joined") {
+    clearJoinLeaveSelectionState(chatId, lineUserId);
     return getCollectingMemberUpdateText({
       type: "not-joined",
       actorName: displayName,
@@ -704,11 +764,49 @@ async function handleJoinOrLeaveWithRoster(
     });
   }
 
+  clearJoinLeaveSelectionState(chatId, lineUserId);
   return getCollectingMemberUpdateText({
     type: action === "join" ? "joined" : "left",
     actorName: displayName,
     memberNames: result.participants.map((participant) => participant.displayName)
   });
+}
+
+async function openJoinLeaveFlow(event: LineMessageEvent) {
+  const { chatType, chatId, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const active = await getActiveLedgerParticipants(binding.group.id);
+
+  if (!active.ledger) {
+    return getNoActiveJoinLeaveLedgerText();
+  }
+
+  activateJoinLeaveSelectionState(chatId, lineUserId);
+
+  const memberLine =
+    active.participants.length > 0
+      ? active.participants.map((participant) => participant.displayName).join("、")
+      : "目前尚未有成員";
+
+  return [
+    `目前活動：${active.ledger.name}`,
+    "",
+    "請輸入：",
+    "+ 加入活動",
+    "- 退出活動",
+    "",
+    "目前成員：",
+    memberLine
+  ].join("\n");
 }
 
 async function handleConfirmMembers(event: LineMessageEvent) {
@@ -2122,10 +2220,10 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
       return handleCreateLedgerCommand(event, command.name);
 
     case "join-activity":
-      return handleJoinOrLeaveWithRoster(event, "join");
+      return openJoinLeaveFlow(event);
 
     case "leave-activity":
-      return handleJoinOrLeaveWithRoster(event, "leave");
+      return openJoinLeaveFlow(event);
 
     case "confirm-members":
       return handleConfirmMembers(event);
@@ -2385,6 +2483,25 @@ async function handleMessageEvent(event: LineMessageEvent) {
         return handleExpenseDraftContinuation(event, pendingExpenseState.pending);
       }
     }
+  }
+
+  if (chatType !== "user" && (isJoinSelectionText(rawText) || isLeaveSelectionText(rawText))) {
+    if (hasActiveJoinLeaveSelectionState(chatId, lineUserId)) {
+      return handleJoinOrLeaveWithRoster(
+        event,
+        isJoinSelectionText(rawText) ? "join" : "leave"
+      );
+    }
+
+    return null;
+  }
+
+  if (
+    chatType !== "user" &&
+    (parsed.kind === "join-activity" || parsed.kind === "leave-activity") &&
+    rawText !== "加入活動"
+  ) {
+    return null;
   }
 
   if (parsed.kind === "confirm") {
