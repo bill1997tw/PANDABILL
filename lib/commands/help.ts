@@ -18,7 +18,17 @@ export function getXiaoerMenuText() {
 }
 
 export function getSettlementMenuText() {
-  return "好勒~ 以下是小二能幫大人做的";
+  return [
+    "請選擇算帳功能：",
+    "",
+    "1. 查看目前結算",
+    "2. 帳本結算",
+    "3. 代墊 MVP",
+    "4. 查看封存帳本",
+    "5. 結束活動並封存帳本",
+    "",
+    "請輸入數字 1～5"
+  ].join("\n");
 }
 
 export function getExpenseGuideText(useLegacyAlias = false) {

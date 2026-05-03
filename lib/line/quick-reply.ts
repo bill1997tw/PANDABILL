@@ -44,10 +44,11 @@ export function buildAssistantQuickReply() {
 
 export function buildSettlementQuickReply() {
   return buildQuickReply([
-    { label: "帳本結算", text: "帳本結算" },
-    { label: "代墊MVP", text: "代墊MVP" },
-    { label: "結束並封存", text: "結束活動同時封存帳本" },
-    { label: "查看封存帳本", text: "查看封存帳本" }
+    { label: "1 查看目前結算", text: "1" },
+    { label: "2 帳本結算", text: "2" },
+    { label: "3 代墊 MVP", text: "3" },
+    { label: "4 查看封存帳本", text: "4" },
+    { label: "5 結束並封存", text: "5" }
   ]);
 }
 

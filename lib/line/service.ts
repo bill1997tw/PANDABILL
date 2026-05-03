@@ -178,6 +178,10 @@ function buildSettlementBlock(lines: string[]) {
   return ["目前結算：", ...lines].join("\n");
 }
 
+function getNoFormalSettlementText() {
+  return "目前沒有可結算的正式記帳資料。";
+}
+
 function getGroupOnlyMessage() {
   return "請在群組裡使用這個功能。";
 }
@@ -889,6 +893,35 @@ async function handleSettlement(event: LineMessageEvent) {
       transfers: snapshot.summary.settlement
     }),
     buildSettlementResultQuickReply()
+  );
+}
+
+async function handleCurrentSettlement(event: LineMessageEvent) {
+  const { chatType } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const snapshot = await getSettlementSnapshot(binding.group.id);
+
+  if (!snapshot?.activeLedger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (!snapshot.summary.settlement.length) {
+    return getNoFormalSettlementText();
+  }
+
+  return buildSettlementBlock(
+    snapshot.summary.settlement.map(
+      (item) => `${item.fromName} → ${item.toName} ${item.amountDisplay}`
+    )
   );
 }
 
@@ -1673,7 +1706,7 @@ async function resolveShortcutCommand(
       return { kind: "start-payment-setup" };
     }
 
-    return { kind: "menu-context-required" };
+    return { kind: "ignored" };
   }
 
   if (menuMode === "xiaoer") {
@@ -1708,19 +1741,23 @@ async function resolveShortcutCommand(
 
   if (menuMode === "settlement") {
     if (number === 1) {
-      return { kind: "settlement" };
+      return { kind: "current-settlement" };
     }
 
     if (number === 2) {
-      return { kind: "mvp" };
+      return { kind: "settlement" };
     }
 
     if (number === 3) {
-      return { kind: "close-ledger" };
+      return { kind: "mvp" };
     }
 
     if (number === 4) {
       return { kind: "list-archived-ledgers" };
+    }
+
+    if (number === 5) {
+      return { kind: "close-ledger" };
     }
   }
 
@@ -1813,6 +1850,9 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
 
     case "current-ledger":
       return handleCurrentLedger(event);
+
+    case "current-settlement":
+      return handleCurrentSettlement(event);
 
     case "reset-ledger":
       return handleResetLedger(event);

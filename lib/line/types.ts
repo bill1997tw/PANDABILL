@@ -54,6 +54,7 @@ export type ParsedLineCommand =
   | { kind: "create-ledger"; name: string }
   | { kind: "switch-ledger"; name: string }
   | { kind: "current-ledger" }
+  | { kind: "current-settlement" }
   | { kind: "reset-ledger" }
   | { kind: "group-info" }
   | { kind: "list-ledgers" }
