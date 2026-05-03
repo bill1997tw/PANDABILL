@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { resolveAppBaseUrl } from "@/lib/app-url";
+import { getSafeUserErrorMessage } from "@/lib/db-error";
 import { replyLineText } from "@/lib/line/client";
 import { verifyLineSignature } from "@/lib/line/signature";
 import { handleLineEvent } from "@/lib/line/service";
@@ -9,10 +10,8 @@ import type { LineWebhookBody } from "@/lib/line/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SAFE_LINE_ERROR_REPLY = "小二暫時連線不穩，請稍後再試。";
-
-async function safeReplyDatabaseError(replyToken: string) {
-  await replyLineText(replyToken, SAFE_LINE_ERROR_REPLY);
+async function safeReplyDatabaseError(replyToken: string, error: unknown) {
+  await replyLineText(replyToken, getSafeUserErrorMessage(error));
 }
 
 export async function GET() {
@@ -69,7 +68,7 @@ export async function POST(request: Request) {
         });
 
         try {
-          await safeReplyDatabaseError(event.replyToken);
+          await safeReplyDatabaseError(event.replyToken, error);
         } catch (replyError) {
           console.error("LINE fallback reply failed", replyError);
         }
