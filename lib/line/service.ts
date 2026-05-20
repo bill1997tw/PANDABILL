@@ -97,7 +97,13 @@ import type { LineEvent, LineJoinLikeEvent, LineMessageEvent, ParsedLineCommand 
 const AWAITING_ACTIVITY_NAME_ACTION = PendingActionType.awaiting_activity_name;
 const AWAITING_EXPENSE_DETAILS_ACTION = PendingActionType.awaiting_expense_details;
 const JOIN_LEAVE_SELECTION_TTL_MS = 5 * 60 * 1000;
+const MENU_SHORTCUT_TTL_MS = 5 * 60 * 1000;
+const ACTIVITY_PENDING_HINT_TTL_MS = 3 * 60 * 1000;
+const EXPENSE_PENDING_HINT_TTL_MS = 10 * 60 * 1000;
 const joinLeaveSelectionState = new Map<string, number>();
+const menuShortcutState = new Map<string, number>();
+const pendingActivityHintState = new Map<string, number>();
+const pendingExpenseHintState = new Map<string, number>();
 
 type PendingExpenseDraft = {
   title: string;
@@ -116,6 +122,52 @@ type ConfirmedParticipantRef = Awaited<
 
 function getJoinLeaveSelectionStateKey(chatId: string, lineUserId?: string) {
   return lineUserId ? `${chatId}:${lineUserId}` : null;
+}
+
+function getTimedStateKey(chatId: string, lineUserId?: string) {
+  return lineUserId ? `${chatId}:${lineUserId}` : null;
+}
+
+function activateTimedState(
+  state: Map<string, number>,
+  chatId: string,
+  lineUserId: string | undefined,
+  ttlMs: number
+) {
+  const key = getTimedStateKey(chatId, lineUserId);
+  if (!key) {
+    return;
+  }
+
+  state.set(key, Date.now() + ttlMs);
+}
+
+function clearTimedState(state: Map<string, number>, chatId: string, lineUserId?: string) {
+  const key = getTimedStateKey(chatId, lineUserId);
+  if (!key) {
+    return;
+  }
+
+  state.delete(key);
+}
+
+function hasActiveTimedState(state: Map<string, number>, chatId: string, lineUserId?: string) {
+  const key = getTimedStateKey(chatId, lineUserId);
+  if (!key) {
+    return false;
+  }
+
+  const expiresAt = state.get(key);
+  if (!expiresAt) {
+    return false;
+  }
+
+  if (expiresAt < Date.now()) {
+    state.delete(key);
+    return false;
+  }
+
+  return true;
 }
 
 function activateJoinLeaveSelectionState(chatId: string, lineUserId?: string) {
@@ -153,6 +205,43 @@ function hasActiveJoinLeaveSelectionState(chatId: string, lineUserId?: string) {
   }
 
   return true;
+}
+
+function activateMenuShortcutState(chatId: string, lineUserId?: string) {
+  activateTimedState(menuShortcutState, chatId, lineUserId, MENU_SHORTCUT_TTL_MS);
+}
+
+function hasActiveMenuShortcutState(chatId: string, lineUserId?: string) {
+  return hasActiveTimedState(menuShortcutState, chatId, lineUserId);
+}
+
+function activatePendingActivityHint(chatId: string, lineUserId?: string) {
+  activateTimedState(
+    pendingActivityHintState,
+    chatId,
+    lineUserId,
+    ACTIVITY_PENDING_HINT_TTL_MS
+  );
+}
+
+function clearPendingActivityHint(chatId: string, lineUserId?: string) {
+  clearTimedState(pendingActivityHintState, chatId, lineUserId);
+}
+
+function hasActivePendingActivityHint(chatId: string, lineUserId?: string) {
+  return hasActiveTimedState(pendingActivityHintState, chatId, lineUserId);
+}
+
+function activatePendingExpenseHint(chatId: string, lineUserId?: string) {
+  activateTimedState(pendingExpenseHintState, chatId, lineUserId, EXPENSE_PENDING_HINT_TTL_MS);
+}
+
+function clearPendingExpenseHint(chatId: string, lineUserId?: string) {
+  clearTimedState(pendingExpenseHintState, chatId, lineUserId);
+}
+
+function hasActivePendingExpenseHint(chatId: string, lineUserId?: string) {
+  return hasActiveTimedState(pendingExpenseHintState, chatId, lineUserId);
 }
 
 function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextReplyPayload {
@@ -618,6 +707,7 @@ async function startAwaitingActivityName(input: {
     actionType: AWAITING_ACTIVITY_NAME_ACTION,
     ttlMinutes: 3
   });
+  activatePendingActivityHint(input.chatId, input.lineUserId);
 
   return getAwaitingActivityNamePrompt();
 }
@@ -635,6 +725,7 @@ async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) 
   }
 
   if (lineUserId) {
+    clearPendingActivityHint(chatId, lineUserId);
     await clearPendingAction({
       chatId,
       requesterLineUserId: lineUserId,
@@ -654,6 +745,7 @@ async function handleCreateLedgerCommand(event: LineMessageEvent, name: string) 
     groupId: binding.group.id,
     mode: "xiaoer"
   });
+  activateMenuShortcutState(chatId, lineUserId);
 
   const activeParticipants = await getActiveLedgerParticipants(binding.group.id);
   const memberNames = activeParticipants.participants.map((participant) => participant.displayName);
@@ -693,13 +785,16 @@ async function handleCreateLedgerFromPending(event: LineMessageEvent, name: stri
   });
 
   if (pendingState.expired) {
+    clearPendingActivityHint(chatId, lineUserId);
     return getAwaitingActivityNameExpiredPrompt();
   }
 
   if (!pendingState.pending) {
+    clearPendingActivityHint(chatId, lineUserId);
     return getAwaitingActivityNameExpiredPrompt();
   }
 
+  clearPendingActivityHint(chatId, lineUserId);
   await clearPendingAction({
     chatId,
     requesterLineUserId: lineUserId,
@@ -1216,6 +1311,7 @@ async function keepContinuousExpenseModeActive(input: {
     payload: input.payload ?? null,
     ttlMinutes: 10
   });
+  activatePendingExpenseHint(input.chatId, input.requesterLineUserId);
 }
 
 function describeExpenseLineFailure(line: string) {
@@ -1656,13 +1752,11 @@ async function handleExpenseDraftStart(event: LineMessageEvent) {
     return null;
   }
 
-  await createPendingAction({
+  await keepContinuousExpenseModeActive({
     groupId: binding.group.id,
     chatId,
     requesterLineUserId: lineUserId,
-    actionType: AWAITING_EXPENSE_DETAILS_ACTION,
     payload: serializeExpenseDraftPayload(buildExpenseDraft(header.title, header.amount)),
-    ttlMinutes: 10
   });
 
   return `已記下：${header.title} ${header.amount}\n請再輸入付款人，例如：小明付`;
@@ -1693,13 +1787,11 @@ async function startAwaitingExpenseInput(event: LineMessageEvent) {
     return getExpenseNotAllowedText();
   }
 
-  await createPendingAction({
+  await keepContinuousExpenseModeActive({
     groupId: binding.group.id,
     chatId,
     requesterLineUserId: lineUserId,
-    actionType: AWAITING_EXPENSE_DETAILS_ACTION,
-    payload: null,
-    ttlMinutes: 10
+    payload: null
   });
 
   return withQuickReply(getContinuousExpensePrompt(), buildExpenseQuickReply());
@@ -1717,6 +1809,7 @@ async function handleExpenseDraftContinuation(
 
   const draft = parseExpenseDraftPayload(pending.payload);
   if (!draft) {
+    clearPendingExpenseHint(chatId, lineUserId);
     await clearPendingAction({
       chatId,
       requesterLineUserId: lineUserId,
@@ -2166,6 +2259,7 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
           groupId: binding?.group.id ?? null,
           mode: "xiaoer"
         });
+        activateMenuShortcutState(chatId, lineUserId);
       }
       return withQuickReply(getXiaoerMenuText(), buildAssistantQuickReply());
 
@@ -2178,6 +2272,7 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
           groupId: binding?.group.id ?? null,
           mode: "settlement"
         });
+        activateMenuShortcutState(chatId, lineUserId);
       }
       return withQuickReply(getSettlementMenuText(), buildSettlementQuickReply());
 
@@ -2389,8 +2484,39 @@ async function handleMessageEvent(event: LineMessageEvent) {
 
   const rawText = event.message.text.trim();
   const parsed = mapGroupFallbackCommand(rawText, parseLineCommand(event.message.text));
+  const shouldCheckPendingActivity = Boolean(
+    lineUserId &&
+      (chatType === "user" || hasActivePendingActivityHint(chatId, lineUserId))
+  );
+  const shouldCheckPendingExpense = Boolean(
+    lineUserId &&
+      (chatType === "user" || hasActivePendingExpenseHint(chatId, lineUserId))
+  );
 
-  if (lineUserId) {
+  if (chatType !== "user") {
+    if (isUrlLikeText(rawText) && !shouldCheckPendingActivity && !shouldCheckPendingExpense) {
+      return null;
+    }
+
+    if (
+      parsed.kind === "shortcut" &&
+      !hasActiveMenuShortcutState(chatId, lineUserId) &&
+      !shouldCheckPendingActivity &&
+      !shouldCheckPendingExpense
+    ) {
+      return null;
+    }
+
+    if (parsed.kind === "ignored" && !shouldCheckPendingActivity && !shouldCheckPendingExpense) {
+      return null;
+    }
+
+    if (parsed.kind === "expense" && !shouldCheckPendingExpense) {
+      return null;
+    }
+  }
+
+  if (lineUserId && shouldCheckPendingActivity) {
     const pendingActivityState = await getPendingActionState({
       chatId,
       requesterLineUserId: lineUserId,
@@ -2399,6 +2525,7 @@ async function handleMessageEvent(event: LineMessageEvent) {
 
     if (pendingActivityState.pending) {
       if (parsed.kind === "cancel") {
+        clearPendingActivityHint(chatId, lineUserId);
         await clearPendingAction({
           chatId,
           requesterLineUserId: lineUserId,
@@ -2412,9 +2539,14 @@ async function handleMessageEvent(event: LineMessageEvent) {
         return handleCreateLedgerFromPending(event, rawText);
       }
     } else if (pendingActivityState.expired && parsed.kind === "ignored" && rawText) {
+      clearPendingActivityHint(chatId, lineUserId);
       return getAwaitingActivityNameExpiredPrompt();
+    } else if (chatType !== "user") {
+      clearPendingActivityHint(chatId, lineUserId);
     }
+  }
 
+  if (lineUserId && shouldCheckPendingExpense) {
     const pendingExpenseState = await getPendingActionState({
       chatId,
       requesterLineUserId: lineUserId,
@@ -2423,6 +2555,7 @@ async function handleMessageEvent(event: LineMessageEvent) {
 
     if (pendingExpenseState.pending) {
       if (parsed.kind === "cancel") {
+        clearPendingExpenseHint(chatId, lineUserId);
         await clearPendingAction({
           chatId,
           requesterLineUserId: lineUserId,
@@ -2432,6 +2565,7 @@ async function handleMessageEvent(event: LineMessageEvent) {
       }
 
       if (isContinuousExpenseCompleteCommand(rawText)) {
+        clearPendingExpenseHint(chatId, lineUserId);
         await clearPendingAction({
           chatId,
           requesterLineUserId: lineUserId,
@@ -2482,6 +2616,8 @@ async function handleMessageEvent(event: LineMessageEvent) {
       ) {
         return handleExpenseDraftContinuation(event, pendingExpenseState.pending);
       }
+    } else if (chatType !== "user") {
+      clearPendingExpenseHint(chatId, lineUserId);
     }
   }
 
