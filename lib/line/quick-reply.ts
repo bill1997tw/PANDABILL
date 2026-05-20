@@ -34,12 +34,13 @@ function buildQuickReply(options: QuickReplyOption[]): LineQuickReply {
 export function buildAssistantQuickReply() {
   return buildQuickReply([
     { label: "1 建立活動", text: "建立活動" },
-    { label: "2 加入/退出", text: "+" },
-    { label: "3 確認成員", text: "確認成員" },
-    { label: "4 設定收款", text: "設定收款方式" },
-    { label: "5 新增支出", text: "新增支出" },
-    { label: "6 查看目前支出", text: "查看目前支出" },
-    { label: "7 刪除上一筆", text: "刪除上一筆" },
+    { label: "2 加入/退出", text: "加入活動" },
+    { label: "3 查看成員", text: "查看成員" },
+    { label: "4 確認成員", text: "確認成員" },
+    { label: "5 設定收款", text: "設定收款方式" },
+    { label: "6 新增支出", text: "新增支出" },
+    { label: "7 查看目前支出", text: "查看目前支出" },
+    { label: "8 刪除上一筆", text: "刪除上一筆" },
     { label: "算帳", text: "算帳" }
   ]);
 }

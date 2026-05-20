@@ -5,7 +5,7 @@ function normalize(text: string) {
 }
 
 function parseShortcut(text: string): ParsedLineCommand | null {
-  const match = text.match(/^([1-7])\s*(.*)$/u);
+  const match = text.match(/^([1-8])\s*(.*)$/u);
 
   if (!match) {
     return null;

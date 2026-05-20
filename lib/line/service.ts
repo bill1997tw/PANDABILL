@@ -2283,22 +2283,26 @@ async function resolveShortcutCommand(
     }
 
     if (number === 3) {
-      return { kind: "confirm-members" };
+      return { kind: "list-members" };
     }
 
     if (number === 4) {
-      return { kind: "start-payment-setup" };
+      return { kind: "confirm-members" };
     }
 
     if (number === 5) {
-      return { kind: "expense-help" };
+      return { kind: "start-payment-setup" };
     }
 
     if (number === 6) {
-      return { kind: "recent-expenses" };
+      return { kind: "expense-help" };
     }
 
     if (number === 7) {
+      return { kind: "recent-expenses" };
+    }
+
+    if (number === 8) {
       return { kind: "delete-last-expense" };
     }
   }
