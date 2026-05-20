@@ -56,6 +56,34 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     };
   }
 
+  if (/^(加成員|新增成員|追加成員|手動追加成員|手動新增成員)(?:\s|$)/u.test(normalized)) {
+    const payload = normalized
+      .replace(/^(加成員|新增成員|追加成員|手動追加成員|手動新增成員)\s*/u, "")
+      .trim();
+    const names = payload
+      .split(/[\s、,，]+/u)
+      .map((name) => name.trim())
+      .filter(Boolean);
+
+    if (names.length > 0) {
+      return {
+        kind: "add-members",
+        names
+      };
+    }
+  }
+
+  if (/^(移除成員|刪除成員|移出成員)(?:\s|$)/u.test(normalized)) {
+    const name = normalized.replace(/^(移除成員|刪除成員|移出成員)\s*/u, "").trim();
+
+    if (name) {
+      return {
+        kind: "remove-member",
+        name
+      };
+    }
+  }
+
   if (/^(切換活動|切換帳本)(?:\s|$)/u.test(normalized)) {
     return {
       kind: "switch-ledger",
@@ -75,7 +103,7 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "group-info" };
   }
 
-  if (["查看帳本", "帳本列表", "查看活動"].includes(normalized)) {
+  if (["查看帳本", "帳本列表", "查看活動", "帳本"].includes(normalized)) {
     return { kind: "list-ledgers" };
   }
 
@@ -83,7 +111,7 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "confirm-members" };
   }
 
-  if (["查看成員", "成員名單"].includes(normalized)) {
+  if (["查看成員", "成員名單", "成員"].includes(normalized)) {
     return { kind: "list-members" };
   }
 
@@ -117,18 +145,22 @@ export function parseLineCommand(text: string): ParsedLineCommand {
 
   if (
     ["帳本結算", "查看結算", "結算"].includes(normalized) ||
-    /^1\s*帳本結算$/u.test(normalized)
+    /^2\s*帳本結算$/u.test(normalized)
   ) {
     return { kind: "settlement" };
   }
 
-  if (normalized === "代墊MVP" || /^2\s*代墊MVP$/u.test(normalized)) {
+  if (["查看目前結算", "目前結算"].includes(normalized)) {
+    return { kind: "current-settlement" };
+  }
+
+  if (normalized === "代墊MVP" || /^3\s*代墊MVP$/u.test(normalized)) {
     return { kind: "mvp" };
   }
 
   if (
     ["結束活動", "結束活動同時封存帳本"].includes(normalized) ||
-    /^3\s*結束活動$/u.test(normalized)
+    /^5\s*結束活動並封存帳本$/u.test(normalized)
   ) {
     return { kind: "close-ledger" };
   }
@@ -147,9 +179,7 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     };
   }
 
-  if (
-    ["4設定收款", "4 設定收款", "設定收款方式", "設定收款", "設定"].includes(normalized)
-  ) {
+  if (["4設定收款", "4 設定收款", "設定收款方式", "設定收款", "設定"].includes(normalized)) {
     return { kind: "start-payment-setup" };
   }
 

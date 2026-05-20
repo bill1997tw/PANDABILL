@@ -47,6 +47,8 @@ export type ParsedLineCommand =
   | { kind: "shortcut"; number: number; payload?: string }
   | { kind: "join-activity" }
   | { kind: "leave-activity" }
+  | { kind: "add-members"; names: string[] }
+  | { kind: "remove-member"; name: string }
   | { kind: "confirm-members" }
   | { kind: "list-members" }
   | { kind: "confirm" }

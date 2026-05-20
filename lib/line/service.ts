@@ -58,6 +58,7 @@ import {
   getSettlementSnapshot
 } from "@/lib/group-service";
 import {
+  addMembersToCollectingLedger,
   archiveActiveLedger,
   archiveLedger,
   closeActiveLedger,
@@ -68,6 +69,7 @@ import {
   listLedgers,
   joinCollectingLedger,
   leaveCollectingLedger,
+  removeMemberFromCollectingLedger,
   switchActiveLedger
 } from "@/lib/ledger-service";
 import {
@@ -273,6 +275,8 @@ function isGroupWhitelistedCommand(parsed: ParsedLineCommand) {
     case "start-payment-setup":
     case "join-activity":
     case "leave-activity":
+    case "add-members":
+    case "remove-member":
     case "cancel":
     case "settlement":
     case "mvp":
@@ -902,6 +906,90 @@ async function openJoinLeaveFlow(event: LineMessageEvent) {
     "目前成員：",
     memberLine
   ].join("\n");
+}
+
+async function handleAddMembers(event: LineMessageEvent, names: string[]) {
+  const { chatType, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const result = await addMembersToCollectingLedger({
+    groupId: binding.group.id,
+    requesterLineUserId: lineUserId,
+    names
+  });
+
+  if (result.status === "no-ledger") {
+    return getNoActiveLedgerText();
+  }
+
+  if (result.status === "forbidden") {
+    return "只有活動建立者可以手動加成員。\n你可以輸入 + 加入活動，或輸入 - 退出活動。";
+  }
+
+  if (result.status === "not-collecting") {
+    return "這個活動的成員已經確認完成，不能再手動新增成員。";
+  }
+
+  const memberLine =
+    result.participants.length > 0
+      ? result.participants.map((participant) => participant.displayName).join("、")
+      : "目前沒有成員";
+
+  if (result.status === "already-exists") {
+    return `這些成員已經在活動中了。\n目前成員共 ${result.participants.length} 人：\n${memberLine}`;
+  }
+
+  return `已加入成員：\n${result.addedNames.join("、")}\n\n目前成員共 ${result.participants.length} 人：\n${memberLine}`;
+}
+
+async function handleRemoveMember(event: LineMessageEvent, name: string) {
+  const { chatType, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const result = await removeMemberFromCollectingLedger({
+    groupId: binding.group.id,
+    requesterLineUserId: lineUserId,
+    name
+  });
+
+  if (result.status === "no-ledger") {
+    return getNoActiveLedgerText();
+  }
+
+  if (result.status === "forbidden") {
+    return "只有活動建立者可以移除成員。";
+  }
+
+  if (result.status === "not-collecting") {
+    return "這個活動的成員已經確認完成，不能再手動移除成員。";
+  }
+
+  if (result.status === "not-found") {
+    return `找不到成員：${name}`;
+  }
+
+  const memberLine =
+    result.participants.length > 0
+      ? result.participants.map((participant) => participant.displayName).join("、")
+      : "目前沒有成員";
+
+  return `已移除：${result.removedName}\n目前成員共 ${result.participants.length} 人：\n${memberLine}`;
 }
 
 async function handleConfirmMembers(event: LineMessageEvent) {
@@ -2319,6 +2407,12 @@ async function handleResolvedCommand(event: LineMessageEvent, command: ParsedLin
 
     case "leave-activity":
       return openJoinLeaveFlow(event);
+
+    case "add-members":
+      return handleAddMembers(event, command.names);
+
+    case "remove-member":
+      return handleRemoveMember(event, command.name);
 
     case "confirm-members":
       return handleConfirmMembers(event);

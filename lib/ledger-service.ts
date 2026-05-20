@@ -31,6 +31,10 @@ type LedgerMutationResult = {
   previousActiveName: string | null;
 };
 
+function normalizeName(value: string) {
+  return value.trim().replace(/\s+/g, "").toLowerCase();
+}
+
 function ledgerSelect() {
   return {
     id: true,
@@ -115,6 +119,19 @@ async function getSortedActiveParticipants(
   });
 
   return sortActiveParticipants(participants, creatorLineUserId);
+}
+
+function findParticipantByName(
+  participants: ActiveLedgerParticipantWithMember[],
+  name: string
+) {
+  const normalized = normalizeName(name);
+
+  return participants.find(
+    (participant) =>
+      normalizeName(participant.displayName) === normalized ||
+      normalizeName(participant.member.name) === normalized
+  );
 }
 
 async function resolveOrCreateMember(input: {
@@ -564,6 +581,163 @@ export async function leaveCollectingLedger(input: {
         ledger.id,
         ledger.creatorLineUserId
       )
+    };
+  });
+}
+
+export async function addMembersToCollectingLedger(input: {
+  groupId: string;
+  requesterLineUserId?: string;
+  names: string[];
+}) {
+  return db.$transaction(async (tx) => {
+    const ledger = await tx.ledger.findFirst({
+      where: {
+        groupId: input.groupId,
+        isActive: true
+      }
+    });
+
+    if (!ledger) {
+      return { status: "no-ledger" as const, ledgerName: null, participants: [], addedNames: [] };
+    }
+
+    if (!input.requesterLineUserId || ledger.creatorLineUserId !== input.requesterLineUserId) {
+      return {
+        status: "forbidden" as const,
+        ledgerName: ledger.name,
+        participants: await getSortedActiveParticipants(tx, ledger.id, ledger.creatorLineUserId),
+        addedNames: []
+      };
+    }
+
+    if (!ledger.isCollectingMembers) {
+      return {
+        status: "not-collecting" as const,
+        ledgerName: ledger.name,
+        participants: await getSortedActiveParticipants(tx, ledger.id, ledger.creatorLineUserId),
+        addedNames: []
+      };
+    }
+
+    const cleanedNames = [...new Set(input.names.map((name) => name.trim()).filter(Boolean))];
+    const addedNames: string[] = [];
+
+    for (const name of cleanedNames) {
+      const member = await resolveOrCreateMember({
+        tx,
+        groupId: input.groupId,
+        displayName: name
+      });
+
+      const existing = await tx.ledgerParticipant.findFirst({
+        where: {
+          ledgerId: ledger.id,
+          memberId: member.id
+        }
+      });
+
+      if (existing?.isActive) {
+        continue;
+      }
+
+      if (existing) {
+        await tx.ledgerParticipant.update({
+          where: { id: existing.id },
+          data: {
+            isActive: true,
+            displayName: member.name,
+            leftAt: null
+          }
+        });
+      } else {
+        await tx.ledgerParticipant.create({
+          data: {
+            ledgerId: ledger.id,
+            memberId: member.id,
+            lineUserId: member.lineUserId,
+            displayName: member.name
+          }
+        });
+      }
+
+      addedNames.push(member.name);
+    }
+
+    return {
+      status: addedNames.length > 0 ? ("added" as const) : ("already-exists" as const),
+      ledgerName: ledger.name,
+      participants: await getSortedActiveParticipants(tx, ledger.id, ledger.creatorLineUserId),
+      addedNames
+    };
+  });
+}
+
+export async function removeMemberFromCollectingLedger(input: {
+  groupId: string;
+  requesterLineUserId?: string;
+  name: string;
+}) {
+  return db.$transaction(async (tx) => {
+    const ledger = await tx.ledger.findFirst({
+      where: {
+        groupId: input.groupId,
+        isActive: true
+      }
+    });
+
+    if (!ledger) {
+      return {
+        status: "no-ledger" as const,
+        ledgerName: null,
+        participants: [],
+        removedName: null
+      };
+    }
+
+    if (!input.requesterLineUserId || ledger.creatorLineUserId !== input.requesterLineUserId) {
+      return {
+        status: "forbidden" as const,
+        ledgerName: ledger.name,
+        participants: await getSortedActiveParticipants(tx, ledger.id, ledger.creatorLineUserId),
+        removedName: null
+      };
+    }
+
+    if (!ledger.isCollectingMembers) {
+      return {
+        status: "not-collecting" as const,
+        ledgerName: ledger.name,
+        participants: await getSortedActiveParticipants(tx, ledger.id, ledger.creatorLineUserId),
+        removedName: null
+      };
+    }
+
+    const participants = await getSortedActiveParticipants(tx, ledger.id, ledger.creatorLineUserId);
+    const target = findParticipantByName(participants, input.name);
+
+    if (!target) {
+      return {
+        status: "not-found" as const,
+        ledgerName: ledger.name,
+        participants,
+        removedName: null
+      };
+    }
+
+    await tx.ledgerParticipant.update({
+      where: { id: target.id },
+      data: {
+        isActive: false,
+        leftAt: new Date()
+      }
+    });
+
+    return {
+      status: "removed" as const,
+      ledgerName: ledger.name,
+      participants: await getSortedActiveParticipants(tx, ledger.id, ledger.creatorLineUserId),
+      removedName: target.displayName
     };
   });
 }
