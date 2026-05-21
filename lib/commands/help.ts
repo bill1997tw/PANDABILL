@@ -21,7 +21,6 @@ export function getXiaoerMenuText() {
 export function getSettlementMenuText() {
   return [
     "好勒~ 以下是小二能幫大人做的",
-    "",
     "1. 查看目前結算",
     "2. 帳本結算",
     "3. 代墊 MVP",
@@ -39,6 +38,8 @@ export function getExpenseGuideText(useLegacyAlias = false) {
     "例如：",
     "",
     "晚餐600我付",
+    "",
+    "或",
     "",
     "飲料185",
     "小明付",

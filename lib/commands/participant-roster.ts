@@ -9,16 +9,19 @@ export function formatCurrentMembersLine(memberNames: string[]) {
 export function getCollectingMemberUpdateText(input: {
   type: "joined" | "left" | "already-joined" | "not-joined";
   actorName: string;
+  activityName?: string;
   memberNames: string[];
 }) {
+  const activitySuffix = input.activityName ? `：${input.activityName}` : "";
+
   const header =
     input.type === "joined"
-      ? `${input.actorName}已加入本次活動`
+      ? `${input.actorName}已加入該活動${activitySuffix}`
       : input.type === "left"
-        ? `${input.actorName}已退出本次活動`
+        ? `${input.actorName}已退出該活動${activitySuffix}`
         : input.type === "already-joined"
-          ? "你已經在本次活動名單中"
-          : "你目前不在本次活動名單中";
+          ? `${input.actorName}已經在本次活動名單中${activitySuffix}`
+          : `${input.actorName}目前不在本次活動名單中${activitySuffix}`;
 
   return [header, formatCurrentMembersLine(input.memberNames)].join("\n");
 }
