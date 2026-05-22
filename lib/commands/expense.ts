@@ -25,10 +25,7 @@ function normalizeWhitespace(text: string) {
 }
 
 function cleanTitle(value: string) {
-  return value
-    .replace(/^(我付了|我先付|新增支出|支出)/u, "")
-    .replace(/元$/u, "")
-    .trim();
+  return value.replace(/^(新增支出|支出)/u, "").replace(/^[:：]/u, "").trim();
 }
 
 function buildParsedExpense(
@@ -41,7 +38,7 @@ function buildParsedExpense(
 ): ParsedExpenseIntent | null {
   const clean = cleanTitle(title);
 
-  if (!clean) {
+  if (!clean || !amount) {
     return null;
   }
 
@@ -60,82 +57,36 @@ export function parseNaturalExpense(text: string): ParsedExpenseIntent | null {
     return null;
   }
 
-  const patterns: Array<() => ParsedExpenseIntent | null> = [
-    () => {
-      const match = normalized.match(/^我付了(?<title>.+?)(?<amount>\d+)元?$/u);
-      if (!match?.groups) {
-        return null;
-      }
+  const senderPaid = normalized.match(/^(?<title>.+?)(?<amount>\d+)\s*(我付|我出|我墊)$/u);
+  if (senderPaid?.groups) {
+    return buildParsedExpense(senderPaid.groups.title, senderPaid.groups.amount, {
+      payerIsSender: true
+    });
+  }
 
-      return buildParsedExpense(match.groups.title, match.groups.amount, {
-        payerIsSender: true
-      });
-    },
-    () => {
-      const match = normalized.match(/^(?<title>.+?)(?<amount>\d+)我付$/u);
-      if (!match?.groups) {
-        return null;
-      }
+  const namedPaid = normalized.match(
+    /^(?<title>.+?)(?<amount>\d+)\s*(?<payer>[\p{Script=Han}A-Za-z0-9_]{1,20})付$/u
+  );
+  if (namedPaid?.groups) {
+    return buildParsedExpense(namedPaid.groups.title, namedPaid.groups.amount, {
+      payerName: namedPaid.groups.payer
+    });
+  }
 
-      return buildParsedExpense(match.groups.title, match.groups.amount, {
-        payerIsSender: true
-      });
-    },
-    () => {
-      const match = normalized.match(/^(?<title>.+?)(?<amount>\d+)我先付$/u);
-      if (!match?.groups) {
-        return null;
-      }
+  const senderFront = normalized.match(/^(我付|我出|我墊)(?<title>.+?)(?<amount>\d+)$/u);
+  if (senderFront?.groups) {
+    return buildParsedExpense(senderFront.groups.title, senderFront.groups.amount, {
+      payerIsSender: true
+    });
+  }
 
-      return buildParsedExpense(match.groups.title, match.groups.amount, {
-        payerIsSender: true
-      });
-    },
-    () => {
-      const match = normalized.match(
-        /^(?<payer>[\p{Script=Han}A-Za-z0-9_]{1,20})付(?<title>.+?)(?<amount>\d+)元?$/u
-      );
-
-      if (!match?.groups) {
-        return null;
-      }
-
-      return buildParsedExpense(match.groups.title, match.groups.amount, {
-        payerName: match.groups.payer
-      });
-    },
-    () => {
-      const match = normalized.match(
-        /^(?<title>.+?)\s*(?<amount>\d+)\s*(?<payer>我|[\p{Script=Han}A-Za-z0-9_]{1,20})付$/u
-      );
-
-      if (!match?.groups) {
-        return null;
-      }
-
-      return buildParsedExpense(match.groups.title, match.groups.amount, {
-        payerIsSender: match.groups.payer === "我",
-        payerName: match.groups.payer === "我" ? undefined : match.groups.payer
-      });
-    },
-    () => {
-      const match = normalized.match(/^(?<title>.+?)\s*(?<amount>\d+)$/u);
-
-      if (!match?.groups) {
-        return null;
-      }
-
-      return buildParsedExpense(match.groups.title, match.groups.amount, {
-        payerIsSender: true
-      });
-    }
-  ];
-
-  for (const parse of patterns) {
-    const result = parse();
-    if (result) {
-      return result;
-    }
+  const namedFront = normalized.match(
+    /^(?<payer>[\p{Script=Han}A-Za-z0-9_]{1,20})付(?<title>.+?)(?<amount>\d+)$/u
+  );
+  if (namedFront?.groups) {
+    return buildParsedExpense(namedFront.groups.title, namedFront.groups.amount, {
+      payerName: namedFront.groups.payer
+    });
   }
 
   return null;
@@ -143,14 +94,13 @@ export function parseNaturalExpense(text: string): ParsedExpenseIntent | null {
 
 export function parseExpenseDraftHeader(text: string): ParsedExpenseDraftHeader | null {
   const normalized = normalizeWhitespace(text);
-  const match = normalized.match(/^(?<title>.+?)(?<amount>\d+)元?$/u);
+  const match = normalized.match(/^(?<title>.+?)(?<amount>\d+)$/u);
 
   if (!match?.groups) {
     return null;
   }
 
   const title = cleanTitle(match.groups.title);
-
   if (!title) {
     return null;
   }
@@ -168,7 +118,7 @@ export function parseExpensePayerLine(text: string): ParsedExpensePayerLine | nu
     return null;
   }
 
-  if (normalized === "我付" || normalized === "我付了" || normalized === "我先付") {
+  if (normalized === "我付" || normalized === "我出" || normalized === "我墊") {
     return {
       payerName: "我",
       payerIsSender: true
@@ -176,13 +126,11 @@ export function parseExpensePayerLine(text: string): ParsedExpensePayerLine | nu
   }
 
   const match = normalized.match(/^(?<payer>.+?)付$/u);
-
   if (!match?.groups?.payer) {
     return null;
   }
 
   const payerName = match.groups.payer.trim();
-
   return {
     payerName,
     payerIsSender: payerName === "我"

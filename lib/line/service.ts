@@ -233,15 +233,31 @@ function getAwaitingExpensePrompt() {
     "或",
     "",
     "飲料185",
-    "周永豪付",
-    "100陳彥廷",
-    "50張祥豪",
-    "35周永濠"
+    "小明付",
+    "100小華",
+    "50小美",
+    "35小明"
   ].join("\n");
 }
 
 function getAwaitingExpenseInvalidPrompt() {
   return ["格式不正確，請重新輸入。", "", "例如：", "晚餐600我付"].join("\n");
+}
+
+function isExpenseModeFinishText(text: string) {
+  return ["完成", "結束"].includes(text.trim());
+}
+
+function isExpenseCreatedReply(text: string) {
+  return text.startsWith("已新增支出：");
+}
+
+function appendContinuousExpenseHint(text: string) {
+  if (!isExpenseCreatedReply(text)) {
+    return text;
+  }
+
+  return [text, "", "可繼續輸入下一筆，或輸入【完成】結束。"].join("\n");
 }
 
 function getAwaitingActivityCancelledPrompt() {
@@ -1390,7 +1406,7 @@ async function handleExpenseDraftStart(event: LineMessageEvent) {
     ttlMinutes: 5
   });
 
-  return `已記下：${header.title} ${header.amount}\n請再輸入付款人，例如：周永豪付`;
+  return `已記下：${header.title} ${header.amount}\n請再輸入付款人，例如：小明付`;
 }
 
 async function startAwaitingExpenseInput(event: LineMessageEvent) {
@@ -1424,10 +1440,28 @@ async function startAwaitingExpenseInput(event: LineMessageEvent) {
     requesterLineUserId: lineUserId,
     actionType: AWAITING_EXPENSE_DETAILS_ACTION,
     payload: null,
-    ttlMinutes: 5
+    ttlMinutes: 10
   });
 
-  return withQuickReply(getAwaitingExpensePrompt(), buildExpenseQuickReply());
+  return withQuickReply(
+    [getAwaitingExpensePrompt(), "", "可連續輸入多筆，完成後請輸入【完成】。"].join("\n"),
+    buildExpenseQuickReply()
+  );
+}
+
+async function keepAwaitingExpenseInputActive(input: {
+  groupId: string;
+  chatId: string;
+  lineUserId: string;
+}) {
+  await createPendingAction({
+    groupId: input.groupId,
+    chatId: input.chatId,
+    requesterLineUserId: input.lineUserId,
+    actionType: AWAITING_EXPENSE_DETAILS_ACTION,
+    payload: null,
+    ttlMinutes: 10
+  });
 }
 
 async function handleExpenseDraftContinuation(
@@ -1475,7 +1509,7 @@ async function handleExpenseDraftContinuation(
   }
 
   if (!changed) {
-    return "看不懂這段支出細項，請改成像「周永豪付」或「100陳彥廷」這樣的格式。";
+    return "看不懂這段支出細項，請改成像「小明付」或「100小華」這樣的格式。";
   }
 
   const totalCents = parseAmountToCents(updatedDraft.amount);
@@ -1515,10 +1549,10 @@ async function handleExpenseDraftContinuation(
   });
 
   if (!updatedDraft.payerName) {
-    return `已記下：${updatedDraft.title} ${updatedDraft.amount}\n請再輸入付款人，例如：周永豪付`;
+    return `已記下：${updatedDraft.title} ${updatedDraft.amount}\n請再輸入付款人，例如：小明付`;
   }
 
-  return `目前細項加總：${formatAmountForDisplay(shareTotalCents)} / ${formatAmountForDisplay(totalCents)}\n請繼續輸入下一位，例如：50張祥豪`;
+  return `目前細項加總：${formatAmountForDisplay(shareTotalCents)} / ${formatAmountForDisplay(totalCents)}\n請繼續輸入下一位，例如：50小美`;
 }
 
 async function handleRecentExpenses(event: LineMessageEvent) {
@@ -2176,6 +2210,27 @@ async function handleMessageEvent(event: LineMessageEvent) {
     });
 
     if (pendingExpenseState.pending) {
+      if (isExpenseModeFinishText(rawText)) {
+        await clearPendingAction({
+          chatId,
+          requesterLineUserId: lineUserId,
+          actionType: AWAITING_EXPENSE_DETAILS_ACTION
+        });
+
+        const binding = await getOrCreateGroupContext(event.source);
+        if (!binding) {
+          return getMissingGroupContextMessage();
+        }
+
+        const snapshot = await getSettlementSnapshot(binding.group.id);
+        const settlementLines =
+          snapshot?.summary.settlement.map(
+            (item) => `${item.fromName} → ${item.toName} ${item.amountDisplay}`
+          ) ?? ["目前已經結清，不用再轉帳了。"];
+
+        return ["已結束新增支出。", "", buildSettlementBlock(settlementLines)].join("\n");
+      }
+
       if (parsed.kind === "cancel") {
         await clearPendingAction({
           chatId,
@@ -2188,28 +2243,44 @@ async function handleMessageEvent(event: LineMessageEvent) {
       if (!pendingExpenseState.pending.payload) {
         const multilineExpenseReply = await handleImmediateMultilineExpense(event);
         if (multilineExpenseReply) {
-          await clearPendingAction({
+          const binding = await getOrCreateGroupContext(event.source);
+          if (!binding) {
+            return getMissingGroupContextMessage();
+          }
+
+          await keepAwaitingExpenseInputActive({
+            groupId: binding.group.id,
             chatId,
-            requesterLineUserId: lineUserId,
-            actionType: AWAITING_EXPENSE_DETAILS_ACTION
+            lineUserId
           });
-          return multilineExpenseReply;
+          return appendContinuousExpenseHint(multilineExpenseReply);
         }
 
         const explicitExpense = parseExplicitExpenseWhileAwaiting(rawText);
         if (explicitExpense) {
-          await clearPendingAction({
-            chatId,
-            requesterLineUserId: lineUserId,
-            actionType: AWAITING_EXPENSE_DETAILS_ACTION
-          });
-          return finalizeEqualExpense({
+          const reply = await finalizeEqualExpense({
             event,
             title: explicitExpense.title,
             amount: explicitExpense.amount,
             payerName: explicitExpense.payerName,
             payerIsSender: explicitExpense.payerIsSender
           });
+
+          if (typeof reply === "string" && isExpenseCreatedReply(reply)) {
+            const binding = await getOrCreateGroupContext(event.source);
+            if (!binding) {
+              return getMissingGroupContextMessage();
+            }
+
+            await keepAwaitingExpenseInputActive({
+              groupId: binding.group.id,
+              chatId,
+              lineUserId
+            });
+            return appendContinuousExpenseHint(reply);
+          }
+
+          return reply;
         }
 
         return getAwaitingExpenseInvalidPrompt();
@@ -2238,6 +2309,24 @@ async function handleMessageEvent(event: LineMessageEvent) {
   if (parsed.kind === "shortcut") {
     const resolved = await resolveShortcutCommand(event, parsed.number, parsed.payload);
     return handleResolvedCommand(event, resolved);
+  }
+
+  if (chatType !== "user" && parsed.kind === "ignored") {
+    const directMultilineExpenseReply = await handleImmediateMultilineExpense(event);
+    if (directMultilineExpenseReply) {
+      return directMultilineExpenseReply;
+    }
+
+    const directExpense = parseExplicitExpenseWhileAwaiting(rawText);
+    if (directExpense) {
+      return finalizeEqualExpense({
+        event,
+        title: directExpense.title,
+        amount: directExpense.amount,
+        payerName: directExpense.payerName,
+        payerIsSender: directExpense.payerIsSender
+      });
+    }
   }
 
   if (chatType !== "user") {
