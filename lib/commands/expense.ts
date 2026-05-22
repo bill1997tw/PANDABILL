@@ -89,6 +89,13 @@ export function parseNaturalExpense(text: string): ParsedExpenseIntent | null {
     });
   }
 
+  const headerOnly = normalized.match(/^(?<title>.+?)(?<amount>\d+)$/u);
+  if (headerOnly?.groups) {
+    return buildParsedExpense(headerOnly.groups.title, headerOnly.groups.amount, {
+      payerIsSender: true
+    });
+  }
+
   return null;
 }
 
