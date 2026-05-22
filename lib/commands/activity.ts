@@ -15,6 +15,9 @@ export function getCollectingMembersPrompt(activityName: string, memberNames: st
     "+ / +1 加入",
     "- / -1 退出",
     "",
+    "若要手動新增成員，請輸入：",
+    "加成員 小明 小華 小美",
+    "",
     "全部確認後請按「確認成員」"
   ].join("\n");
 }
@@ -47,8 +50,8 @@ export function getLedgerListText(items: ActivityListItem[]) {
   const active = items.find((item) => item.isActive);
   const recentClosed = items.filter((item) => item.status === "closed").slice(0, 3);
   const archived = items.filter((item) => item.status === "archived");
-  const lines: string[] = ["帳本列表"];
 
+  const lines: string[] = ["帳本列表"];
   lines.push(active ? `目前進行中：${active.name}` : "目前進行中：沒有");
 
   if (recentClosed.length > 0) {
