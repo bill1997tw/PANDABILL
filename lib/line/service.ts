@@ -117,6 +117,15 @@ type ConfirmedParticipantRef = Awaited<
   ReturnType<typeof getConfirmedMemberIdsForActiveLedger>
 >["participants"][number];
 
+type EqualExpenseContext = {
+  groupId: string;
+  ledgerName: string;
+  participants: ConfirmedParticipantRef[];
+  memberIds: string[];
+  actorDisplayName: string;
+  lineUserId?: string;
+};
+
 function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextReplyPayload {
   if (!quickReply) {
     return text;
@@ -1178,6 +1187,90 @@ function resolveCustomShares(input: {
   };
 }
 
+async function loadEqualExpenseContext(event: LineMessageEvent): Promise<
+  | { ok: true; context: EqualExpenseContext }
+  | { ok: false; text: string }
+> {
+  const { chatType, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return { ok: false, text: getGroupOnlyMessage() };
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return { ok: false, text: getMissingGroupContextMessage() };
+  }
+
+  const confirmed = await getConfirmedMemberIdsForActiveLedger(binding.group.id);
+  if (!confirmed.ledger) {
+    return { ok: false, text: getNoActiveLedgerText() };
+  }
+
+  if (confirmed.ledger.isCollectingMembers) {
+    return { ok: false, text: getExpenseNotAllowedText() };
+  }
+
+  const actorDisplayName = await resolveActorDisplayName(event);
+
+  return {
+    ok: true,
+    context: {
+      groupId: binding.group.id,
+      ledgerName: confirmed.ledger.name,
+      participants: confirmed.participants,
+      memberIds: confirmed.memberIds,
+      actorDisplayName,
+      lineUserId
+    }
+  };
+}
+
+async function createEqualExpenseEntry(
+  context: EqualExpenseContext,
+  input: {
+    title: string;
+    amount: string;
+    payerName?: string;
+    payerIsSender?: boolean;
+  }
+) {
+  const payer = resolvePayerParticipant({
+    participants: context.participants,
+    actorDisplayName: context.actorDisplayName,
+    payerName: input.payerName,
+    payerIsSender: input.payerIsSender,
+    lineUserId: context.lineUserId
+  });
+
+  if (!payer) {
+    return {
+      ok: false as const,
+      text: getMissingPayerText(input.payerName ?? context.actorDisplayName)
+    };
+  }
+
+  await createExpenseInGroup({
+    groupId: context.groupId,
+    title: input.title,
+    amount: input.amount,
+    payerId: payer.memberId,
+    participantIds: context.memberIds
+  });
+
+  const amountCents = parseAmountToCents(input.amount);
+  const shareCents = Math.round(amountCents / context.memberIds.length);
+
+  return {
+    ok: true as const,
+    title: input.title,
+    amountCents,
+    payerDisplayName: payer.displayName,
+    participantCount: context.memberIds.length,
+    shareCents
+  };
+}
+
 async function finalizeEqualExpense(input: {
   event: LineMessageEvent;
   title: string;
@@ -1185,51 +1278,17 @@ async function finalizeEqualExpense(input: {
   payerName?: string;
   payerIsSender?: boolean;
 }) {
-  const { chatType, lineUserId } = getChatContext(input.event.source);
-
-  if (chatType === "user") {
-    return getGroupOnlyMessage();
+  const contextResult = await loadEqualExpenseContext(input.event);
+  if (!contextResult.ok) {
+    return contextResult.text;
   }
 
-  const binding = await getOrCreateGroupContext(input.event.source);
-  if (!binding) {
-    return getMissingGroupContextMessage();
+  const created = await createEqualExpenseEntry(contextResult.context, input);
+  if (!created.ok) {
+    return created.text;
   }
 
-  const confirmed = await getConfirmedMemberIdsForActiveLedger(binding.group.id);
-
-  if (!confirmed.ledger) {
-    return getNoActiveLedgerText();
-  }
-
-  if (confirmed.ledger.isCollectingMembers) {
-    return getExpenseNotAllowedText();
-  }
-
-  const actorDisplayName = await resolveActorDisplayName(input.event);
-  const payer = resolvePayerParticipant({
-    participants: confirmed.participants,
-    actorDisplayName,
-    payerName: input.payerName,
-    payerIsSender: input.payerIsSender,
-    lineUserId
-  });
-
-  if (!payer) {
-    return getMissingPayerText(input.payerName ?? actorDisplayName);
-  }
-
-  const created = await createExpenseInGroup({
-    groupId: binding.group.id,
-    title: input.title,
-    amount: input.amount,
-    payerId: payer.memberId,
-    participantIds: confirmed.memberIds
-  });
-
-  const amountCents = parseAmountToCents(input.amount);
-  const shareCents = Math.round(amountCents / confirmed.memberIds.length);
-  const snapshot = await getSettlementSnapshot(binding.group.id);
+  const snapshot = await getSettlementSnapshot(contextResult.context.groupId);
 
   const settlementLines =
     snapshot?.summary.settlement.map(
@@ -1237,10 +1296,10 @@ async function finalizeEqualExpense(input: {
     ) ?? ["目前已經結清，不用再轉帳了。"];
 
   return [
-    `已新增支出：${input.title} ${formatAmountForDisplay(amountCents)}`,
+    `已新增支出：${input.title} ${formatAmountForDisplay(created.amountCents)}`,
     "",
-    `付款人：${payer.displayName}`,
-    `平均分攤：${confirmed.memberIds.length}人，每人${formatAmountForDisplay(shareCents)}`,
+    `付款人：${created.payerDisplayName}`,
+    `平均分攤：${created.participantCount}人，每人${formatAmountForDisplay(created.shareCents)}`,
     "",
     buildSettlementBlock(settlementLines)
   ].join("\n");
@@ -1333,6 +1392,10 @@ async function handleImmediateMultilineExpense(event: LineMessageEvent) {
   const lines = splitMultilineSegments(event.message.text);
 
   if (lines.length < 3) {
+    return null;
+  }
+
+  if (parseNaturalExpense(lines[0])) {
     return null;
   }
 
@@ -1462,6 +1525,139 @@ async function keepAwaitingExpenseInputActive(input: {
     payload: null,
     ttlMinutes: 10
   });
+}
+
+function getBatchExpenseLineErrorReason(line: string) {
+  if (isUrlLikeText(line)) {
+    return "看起來像網址";
+  }
+
+  if (!/\d/.test(line)) {
+    return "缺少金額";
+  }
+
+  if (!line.includes("付")) {
+    return "缺少付款人";
+  }
+
+  return "格式不正確";
+}
+
+function condenseExpenseErrorText(text: string) {
+  return text.split("\n").find((line) => line.trim()) ?? "格式不正確";
+}
+
+async function handleBatchEqualExpenses(
+  event: LineMessageEvent,
+  options?: {
+    keepMode?: boolean;
+    requireAtLeastOneValid?: boolean;
+  }
+) {
+  const lines = splitMultilineSegments(event.message.text);
+
+  if (lines.length < 2) {
+    return null;
+  }
+
+  const parsedLines = lines.map((line) => ({
+    line,
+    parsed: parseNaturalExpense(line)
+  }));
+
+  const validLines = parsedLines.filter((item) => item.parsed);
+  if (validLines.length === 0) {
+    if (options?.requireAtLeastOneValid) {
+      return [
+        "以下項目未新增，請確認格式：",
+        "",
+        ...lines.map((line) => `- ${line}：${getBatchExpenseLineErrorReason(line)}`),
+        "",
+        "請重新輸入錯誤的項目，或輸入【完成】結束。"
+      ].join("\n");
+    }
+
+    return null;
+  }
+
+  const contextResult = await loadEqualExpenseContext(event);
+  if (!contextResult.ok) {
+    return contextResult.text;
+  }
+
+  const successes: Array<{
+    title: string;
+    amountCents: number;
+    payerDisplayName: string;
+  }> = [];
+  const failures: Array<{ line: string; reason: string }> = [];
+
+  for (const item of parsedLines) {
+    if (!item.parsed) {
+      failures.push({
+        line: item.line,
+        reason: getBatchExpenseLineErrorReason(item.line)
+      });
+      continue;
+    }
+
+    const created = await createEqualExpenseEntry(contextResult.context, item.parsed);
+    if (!created.ok) {
+      failures.push({
+        line: item.line,
+        reason: condenseExpenseErrorText(created.text)
+      });
+      continue;
+    }
+
+    successes.push({
+      title: created.title,
+      amountCents: created.amountCents,
+      payerDisplayName: created.payerDisplayName
+    });
+  }
+
+  if (successes.length === 0) {
+    return [
+      "以下項目未新增，請確認格式：",
+      "",
+      ...failures.map((item) => `- ${item.line}：${item.reason}`),
+      "",
+      options?.keepMode ? "請重新輸入錯誤的項目，或輸入【完成】結束。" : "請重新輸入正確的支出格式。"
+    ].join("\n");
+  }
+
+  if (options?.keepMode) {
+    const { chatId, lineUserId } = getChatContext(event.source);
+    if (lineUserId) {
+      await keepAwaitingExpenseInputActive({
+        groupId: contextResult.context.groupId,
+        chatId,
+        lineUserId
+      });
+    }
+  }
+
+  const snapshot = await getSettlementSnapshot(contextResult.context.groupId);
+  const settlementLines =
+    snapshot?.summary.settlement.map(
+      (item) => `${item.fromName} → ${item.toName} ${item.amountDisplay}`
+    ) ?? ["目前已經結清，不用再轉帳了。"];
+
+  return [
+    `已新增 ${successes.length} 筆支出：`,
+    "",
+    ...successes.map(
+      (item, index) =>
+        `${index + 1}. ${item.title} ${formatAmountForDisplay(item.amountCents)}｜${item.payerDisplayName}付`
+    ),
+    ...(failures.length > 0
+      ? ["", "以下項目未新增，請確認格式：", "", ...failures.map((item) => `- ${item.line}：${item.reason}`)]
+      : []),
+    "",
+    buildSettlementBlock(settlementLines),
+    ...(options?.keepMode ? ["", "你可以繼續輸入支出，或輸入【完成】結束。"] : [])
+  ].join("\n");
 }
 
 async function handleExpenseDraftContinuation(
@@ -2256,6 +2452,14 @@ async function handleMessageEvent(event: LineMessageEvent) {
           return appendContinuousExpenseHint(multilineExpenseReply);
         }
 
+        const batchExpenseReply = await handleBatchEqualExpenses(event, {
+          keepMode: true,
+          requireAtLeastOneValid: true
+        });
+        if (batchExpenseReply) {
+          return batchExpenseReply;
+        }
+
         const explicitExpense = parseExplicitExpenseWhileAwaiting(rawText);
         if (explicitExpense) {
           const reply = await finalizeEqualExpense({
@@ -2315,6 +2519,11 @@ async function handleMessageEvent(event: LineMessageEvent) {
     const directMultilineExpenseReply = await handleImmediateMultilineExpense(event);
     if (directMultilineExpenseReply) {
       return directMultilineExpenseReply;
+    }
+
+    const batchExpenseReply = await handleBatchEqualExpenses(event);
+    if (batchExpenseReply) {
+      return batchExpenseReply;
     }
 
     const directExpense = parseExplicitExpenseWhileAwaiting(rawText);
