@@ -45,7 +45,7 @@ export function getExpenseGuideText(useLegacyAlias = false) {
     "小明付",
     "100小華",
     "50小美",
-    "35小陳"
+    "35小明"
   ];
 
   if (!useLegacyAlias) {
