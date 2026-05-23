@@ -872,7 +872,7 @@ function splitBatchExpenseInput(rawText: string) {
     .filter(Boolean);
 }
 
-function parseExplicitExpenseWhileAwaiting(rawText: string) {
+function parseExpenseLineIntent(rawText: string) {
   const normalized = stripExpenseCommandPrefix(rawText);
 
   if (!normalized || normalized.length > 100) {
@@ -887,7 +887,31 @@ function parseExplicitExpenseWhileAwaiting(rawText: string) {
     return null;
   }
 
+  const withTail = normalized.match(/^(?<base>\S+)\s+(?<names>.+)$/u);
+  if (withTail?.groups?.base && withTail.groups.names) {
+    const baseIntent = parseNaturalExpense(withTail.groups.base);
+    if (!baseIntent) {
+      return null;
+    }
+
+    const participantNames = withTail.groups.names
+      .split(/\s+/u)
+      .map((name) => name.trim())
+      .filter(Boolean);
+
+    return participantNames.length > 0
+      ? {
+          ...baseIntent,
+          participantNames
+        }
+      : baseIntent;
+  }
+
   return parseNaturalExpense(normalized);
+}
+
+function parseExplicitExpenseWhileAwaiting(rawText: string) {
+  return parseExpenseLineIntent(rawText);
 }
 
 function getExpenseNotAllowedText() {
@@ -1807,6 +1831,7 @@ async function createEqualExpenseEntry(
     amount: string;
     payerName?: string;
     payerIsSender?: boolean;
+    participantNames?: string[];
   }
 ) {
   const payer = resolvePayerParticipant({
@@ -1824,8 +1849,42 @@ async function createEqualExpenseEntry(
     };
   }
 
+  const targetParticipants =
+    input.participantNames && input.participantNames.length > 0
+      ? (() => {
+          const resolved: ConfirmedParticipantRef[] = [];
+
+          for (const name of input.participantNames) {
+            const participant = findParticipantByName(context.participants, name);
+            if (!participant) {
+              return {
+                ok: false as const,
+                text: getMissingParticipantText(name)
+              };
+            }
+
+            if (!resolved.some((item) => item.memberId === participant.memberId)) {
+              resolved.push(participant);
+            }
+          }
+
+          return {
+            ok: true as const,
+            participants: resolved
+          };
+        })()
+      : {
+          ok: true as const,
+          participants: context.participants
+        };
+
+  if (!targetParticipants.ok) {
+    return targetParticipants;
+  }
+
+  const targetMemberIds = targetParticipants.participants.map((participant) => participant.memberId);
   const amountCents = parseAmountToCents(input.amount);
-  const participantShares = splitAmountEvenly(amountCents, context.memberIds);
+  const participantShares = splitAmountEvenly(amountCents, targetMemberIds);
 
   if (context.mode === "quick") {
     const quickSession = context.quickSession;
@@ -1859,7 +1918,7 @@ async function createEqualExpenseEntry(
       title: input.title,
       amount: input.amount,
       payerId: payer.memberId,
-      participantIds: context.memberIds
+      participantIds: targetMemberIds
     });
   }
 
@@ -1868,8 +1927,10 @@ async function createEqualExpenseEntry(
     title: input.title,
     amountCents,
     payerDisplayName: payer.displayName,
-    participantCount: context.memberIds.length,
-    shareCents: participantShares[0]?.shareCents ?? 0
+    participantCount: targetMemberIds.length,
+    shareCents: participantShares[0]?.shareCents ?? 0,
+    participantNames: targetParticipants.participants.map((participant) => participant.displayName),
+    usedExplicitParticipants: Boolean(input.participantNames && input.participantNames.length > 0)
   };
 }
 
@@ -1879,6 +1940,7 @@ async function finalizeEqualExpense(input: {
   amount: string;
   payerName?: string;
   payerIsSender?: boolean;
+  participantNames?: string[];
 }) {
   const contextResult = await loadEqualExpenseContext(input.event);
   if (!contextResult.ok) {
@@ -2199,7 +2261,7 @@ async function handleBatchEqualExpenses(
 
   const parsedLines = lines.map((line) => ({
     line,
-    parsed: parseNaturalExpense(line)
+    parsed: parseExpenseLineIntent(line)
   }));
 
   const validLines = parsedLines.filter((item) => item.parsed);
