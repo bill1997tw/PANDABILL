@@ -6,6 +6,7 @@ import {
   getLedgerListText,
   getNoActiveLedgerText
 } from "@/lib/commands/activity";
+import { splitAmountEvenly } from "@/lib/calcSplit";
 import {
   parseExpenseDraftHeader,
   parseExpensePayerLine,
@@ -99,6 +100,7 @@ import type { LineEvent, LineJoinLikeEvent, LineMessageEvent, ParsedLineCommand 
 const AWAITING_ACTIVITY_NAME_ACTION = PendingActionType.awaiting_activity_name;
 const AWAITING_EXPENSE_DETAILS_ACTION = PendingActionType.awaiting_expense_details;
 const JOIN_LEAVE_SELECTION_TTL_MS = 5 * 60 * 1000;
+const QUICK_SETTLEMENT_NAME = "即刻算帳";
 
 type PendingExpenseDraft = {
   title: string;
@@ -112,18 +114,50 @@ type PendingExpenseDraft = {
 };
 
 const joinLeaveSelectionState = new Map<string, number>();
+const quickSettlementSessions = new Map<string, QuickSettlementSession>();
 
 type ConfirmedParticipantRef = Awaited<
   ReturnType<typeof getConfirmedMemberIdsForActiveLedger>
 >["participants"][number];
 
 type EqualExpenseContext = {
+  mode: "ledger" | "quick";
   groupId: string;
   ledgerName: string;
   participants: ConfirmedParticipantRef[];
   memberIds: string[];
   actorDisplayName: string;
   lineUserId?: string;
+  quickSession?: QuickSettlementSession;
+};
+
+type QuickSettlementMember = {
+  memberId: string;
+  memberName: string;
+  displayName: string;
+  lineUserId: string | null;
+};
+
+type QuickSettlementExpense = {
+  title: string;
+  amountCents: number;
+  payerMemberId: string;
+  payerDisplayName: string;
+  participantShares: Array<{
+    memberId: string;
+    memberName: string;
+    shareCents: number;
+  }>;
+  createdAt: number;
+};
+
+type QuickSettlementSession = {
+  chatId: string;
+  name: string;
+  creatorLineUserId: string | null;
+  members: QuickSettlementMember[];
+  expenses: QuickSettlementExpense[];
+  createdAt: number;
 };
 
 function withQuickReply(text: string, quickReply?: LineQuickReply): LineTextReplyPayload {
@@ -154,6 +188,210 @@ function hasActiveJoinLeaveSelectionState(chatId: string) {
   }
 
   return true;
+}
+
+function createQuickSettlementMemberId(prefix = "quick-member") {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getQuickSettlementSession(chatId: string) {
+  return quickSettlementSessions.get(chatId) ?? null;
+}
+
+function buildQuickSettlementMemberRefs(session: QuickSettlementSession): ConfirmedParticipantRef[] {
+  return session.members.map((member) => ({
+    memberId: member.memberId,
+    memberName: member.memberName,
+    displayName: member.displayName,
+    lineUserId: member.lineUserId
+  }));
+}
+
+function listQuickSettlementMemberNames(session: QuickSettlementSession) {
+  return session.members.map((member) => member.displayName);
+}
+
+function ensureQuickSettlementMember(input: {
+  session: QuickSettlementSession;
+  displayName: string;
+  lineUserId?: string;
+}) {
+  const normalized = normalizeName(input.displayName);
+
+  const byLineUserId = input.lineUserId
+    ? input.session.members.find((member) => member.lineUserId === input.lineUserId)
+    : null;
+
+  if (byLineUserId) {
+    if (byLineUserId.displayName !== input.displayName) {
+      byLineUserId.displayName = input.displayName;
+      byLineUserId.memberName = input.displayName;
+    }
+
+    return {
+      added: false,
+      member: byLineUserId
+    };
+  }
+
+  const byName = input.session.members.find(
+    (member) => normalizeName(member.displayName) === normalized
+  );
+
+  if (byName) {
+    if (!byName.lineUserId && input.lineUserId) {
+      byName.lineUserId = input.lineUserId;
+    }
+
+    return {
+      added: false,
+      member: byName
+    };
+  }
+
+  const member: QuickSettlementMember = {
+    memberId: createQuickSettlementMemberId(),
+    memberName: input.displayName,
+    displayName: input.displayName,
+    lineUserId: input.lineUserId ?? null
+  };
+
+  input.session.members.push(member);
+
+  return {
+    added: true,
+    member
+  };
+}
+
+function createQuickSettlementSession(input: {
+  chatId: string;
+  creatorLineUserId?: string;
+  creatorDisplayName: string;
+}) {
+  const session: QuickSettlementSession = {
+    chatId: input.chatId,
+    name: QUICK_SETTLEMENT_NAME,
+    creatorLineUserId: input.creatorLineUserId ?? null,
+    members: [],
+    expenses: [],
+    createdAt: Date.now()
+  };
+
+  ensureQuickSettlementMember({
+    session,
+    displayName: input.creatorDisplayName,
+    lineUserId: input.creatorLineUserId
+  });
+
+  quickSettlementSessions.set(input.chatId, session);
+  return session;
+}
+
+function buildQuickSettlementLines(session: QuickSettlementSession) {
+  if (session.expenses.length === 0) {
+    return ["目前沒有可結算的正式記帳資料。"];
+  }
+
+  const paid = new Map<string, number>();
+  const owed = new Map<string, number>();
+
+  for (const member of session.members) {
+    paid.set(member.memberId, 0);
+    owed.set(member.memberId, 0);
+  }
+
+  for (const expense of session.expenses) {
+    paid.set(
+      expense.payerMemberId,
+      (paid.get(expense.payerMemberId) ?? 0) + expense.amountCents
+    );
+
+    for (const participant of expense.participantShares) {
+      owed.set(
+        participant.memberId,
+        (owed.get(participant.memberId) ?? 0) + participant.shareCents
+      );
+    }
+  }
+
+  const creditors = session.members
+    .map((member) => ({
+      member,
+      balance: (paid.get(member.memberId) ?? 0) - (owed.get(member.memberId) ?? 0)
+    }))
+    .filter((item) => item.balance > 0)
+    .sort((left, right) => right.balance - left.balance);
+
+  const debtors = session.members
+    .map((member) => ({
+      member,
+      balance: (owed.get(member.memberId) ?? 0) - (paid.get(member.memberId) ?? 0)
+    }))
+    .filter((item) => item.balance > 0)
+    .sort((left, right) => right.balance - left.balance);
+
+  const lines: string[] = [];
+  let creditorIndex = 0;
+  let debtorIndex = 0;
+
+  while (creditorIndex < creditors.length && debtorIndex < debtors.length) {
+    const creditor = creditors[creditorIndex];
+    const debtor = debtors[debtorIndex];
+    const transferCents = Math.min(creditor.balance, debtor.balance);
+
+    lines.push(
+      `${debtor.member.displayName} → ${creditor.member.displayName} ${formatAmountForDisplay(
+        transferCents
+      )}`
+    );
+
+    creditor.balance -= transferCents;
+    debtor.balance -= transferCents;
+
+    if (creditor.balance === 0) {
+      creditorIndex += 1;
+    }
+
+    if (debtor.balance === 0) {
+      debtorIndex += 1;
+    }
+  }
+
+  return lines.length > 0 ? lines : ["目前沒有可結算的正式記帳資料。"];
+}
+
+function getQuickSettlementExpenseLines(session: QuickSettlementSession, take = 5) {
+  return [...session.expenses]
+    .sort((left, right) => right.createdAt - left.createdAt)
+    .slice(0, take)
+    .map((expense) => {
+      const isEqualSplit =
+        expense.participantShares.length > 0 &&
+        expense.participantShares.every(
+          (participant) => participant.shareCents === expense.participantShares[0]?.shareCents
+        );
+
+      if (isEqualSplit) {
+        return [
+          `${expense.title} ${formatAmountForDisplay(expense.amountCents)}`,
+          `${expense.payerDisplayName}付`,
+          `平均分攤：${expense.participantShares.length}人，每人${formatAmountForDisplay(
+            expense.participantShares[0]?.shareCents ?? 0
+          )}`
+        ].join("\n");
+      }
+
+      return [
+        `${expense.title} ${formatAmountForDisplay(expense.amountCents)}`,
+        `${expense.payerDisplayName}付`,
+        "",
+        ...expense.participantShares.map(
+          (participant) =>
+            `${participant.memberName}：${formatAmountForDisplay(participant.shareCents)}`
+        )
+      ].join("\n");
+    });
 }
 
 function isUrlLikeText(text: string) {
@@ -313,6 +551,148 @@ async function resolveActorDisplayName(event: LineMessageEvent) {
 
 function normalizeName(value: string) {
   return value.trim().replace(/\s+/g, "");
+}
+
+async function startQuickSettlement(event: LineMessageEvent) {
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
+
+  if (chatType === "user") {
+    return getGroupOnlyMessage();
+  }
+
+  const binding = await getOrCreateGroupContext(event.source);
+  if (!binding) {
+    return getMissingGroupContextMessage();
+  }
+
+  const activeLedger = await getActiveLedger(binding.group.id);
+  if (activeLedger) {
+    return `目前已有進行中的活動：${activeLedger.name}\n若要單純即刻算帳，請先結束目前活動。`;
+  }
+
+  const actorDisplayName = await resolveActorDisplayName(event);
+  createQuickSettlementSession({
+    chatId,
+    creatorLineUserId: lineUserId,
+    creatorDisplayName: actorDisplayName
+  });
+
+  activateJoinLeaveSelectionState(chatId);
+
+  return [
+    `已開啟${QUICK_SETTLEMENT_NAME}`,
+    `${actorDisplayName}已加入本次算帳`,
+    "",
+    "其他人可輸入：",
+    "+ / +1 加入",
+    "- / -1 退出",
+    "",
+    "若要手動新增成員，請輸入：",
+    "加成員 小明 小華 小美",
+    "",
+    "可直接輸入支出：",
+    "晚餐500",
+    "飲料200我付",
+    "",
+    "輸入【算帳】可查看目前結算"
+  ].join("\n");
+}
+
+function endQuickSettlement(chatId: string, cancelled = false) {
+  const session = getQuickSettlementSession(chatId);
+
+  if (!session) {
+    return cancelled ? "目前沒有進行中的即刻算帳。" : getNoActiveLedgerText();
+  }
+
+  quickSettlementSessions.delete(chatId);
+
+  if (cancelled) {
+    return "已取消即刻算帳。";
+  }
+
+  return [`已結束${session.name}。`, "", buildQuickSettlementReply(session)].join("\n");
+}
+
+function buildQuickSessionMemberPrompt(session: QuickSettlementSession) {
+  const memberLine =
+    session.members.length > 0
+      ? session.members.map((member) => member.displayName).join("、")
+      : "目前尚未有成員";
+
+  return [
+    `目前活動：${session.name}`,
+    "",
+    "請輸入【加入 + ／退出活動 - 或手動新增成員】",
+    "",
+    `目前成員：${memberLine}`
+  ].join("\n");
+}
+
+async function handleQuickJoinOrLeave(
+  event: LineMessageEvent,
+  action: "join" | "leave",
+  session: QuickSettlementSession
+) {
+  const { lineUserId } = getChatContext(event.source);
+  const displayName = await resolveActorDisplayName(event);
+
+  if (action === "join") {
+    const existingByUser = lineUserId
+      ? session.members.find((member) => member.lineUserId === lineUserId)
+      : null;
+    const existingByName = session.members.find(
+      (member) => normalizeName(member.displayName) === normalizeName(displayName)
+    );
+
+    if (existingByUser || existingByName) {
+      activateJoinLeaveSelectionState(session.chatId);
+      return getCollectingMemberUpdateText({
+        type: "already-joined",
+        actorName: displayName,
+        activityName: session.name,
+        memberNames: listQuickSettlementMemberNames(session)
+      });
+    }
+
+    ensureQuickSettlementMember({
+      session,
+      displayName,
+      lineUserId
+    });
+    activateJoinLeaveSelectionState(session.chatId);
+
+    return getCollectingMemberUpdateText({
+      type: "joined",
+      actorName: displayName,
+      activityName: session.name,
+      memberNames: listQuickSettlementMemberNames(session)
+    });
+  }
+
+  const target = lineUserId
+    ? session.members.find((member) => member.lineUserId === lineUserId)
+    : null;
+
+  if (!target) {
+    activateJoinLeaveSelectionState(session.chatId);
+    return getCollectingMemberUpdateText({
+      type: "not-joined",
+      actorName: displayName,
+      activityName: session.name,
+      memberNames: listQuickSettlementMemberNames(session)
+    });
+  }
+
+  session.members = session.members.filter((member) => member.memberId !== target.memberId);
+  activateJoinLeaveSelectionState(session.chatId);
+
+  return getCollectingMemberUpdateText({
+    type: "left",
+    actorName: target.displayName,
+    activityName: session.name,
+    memberNames: listQuickSettlementMemberNames(session)
+  });
 }
 
 function findParticipantByName(
@@ -725,6 +1105,11 @@ async function handleJoinOrLeaveWithRoster(
         });
 
   if (result.status === "no-ledger") {
+    const quickSession = getQuickSettlementSession(chatId);
+    if (quickSession) {
+      return handleQuickJoinOrLeave(event, action, quickSession);
+    }
+
     return getNoActiveLedgerText();
   }
 
@@ -762,7 +1147,7 @@ async function handleJoinOrLeaveWithRoster(
 }
 
 async function handleAddMembers(event: LineMessageEvent, names: string[]) {
-  const { chatType, lineUserId } = getChatContext(event.source);
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -780,6 +1165,43 @@ async function handleAddMembers(event: LineMessageEvent, names: string[]) {
   });
 
   if (result.status === "no-ledger") {
+    const quickSession = getQuickSettlementSession(chatId);
+
+    if (quickSession) {
+      if (quickSession.creatorLineUserId && quickSession.creatorLineUserId !== lineUserId) {
+        return "只有即刻算帳發起人可以手動新增成員。";
+      }
+
+      const normalizedNames = [...new Set(names.map((name) => name.trim()).filter(Boolean))];
+      const addedNames: string[] = [];
+
+      for (const memberName of normalizedNames) {
+        const existing = quickSession.members.find(
+          (member) => normalizeName(member.displayName) === normalizeName(memberName)
+        );
+
+        if (existing) {
+          continue;
+        }
+
+        quickSession.members.push({
+          memberId: createQuickSettlementMemberId(),
+          memberName,
+          displayName: memberName,
+          lineUserId: null
+        });
+        addedNames.push(memberName);
+      }
+
+      const memberLine = listQuickSettlementMemberNames(quickSession).join("、");
+
+      if (addedNames.length === 0) {
+        return `這些成員已經在即刻算帳中了。\n目前成員共 ${quickSession.members.length} 人：\n${memberLine}`;
+      }
+
+      return `已加入成員：\n${addedNames.join("、")}\n\n目前成員共 ${quickSession.members.length} 人：\n${memberLine}`;
+    }
+
     return getNoActiveLedgerText();
   }
 
@@ -804,7 +1226,7 @@ async function handleAddMembers(event: LineMessageEvent, names: string[]) {
 }
 
 async function handleRemoveMember(event: LineMessageEvent, name: string) {
-  const { chatType, lineUserId } = getChatContext(event.source);
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -822,6 +1244,28 @@ async function handleRemoveMember(event: LineMessageEvent, name: string) {
   });
 
   if (result.status === "no-ledger") {
+    const quickSession = getQuickSettlementSession(chatId);
+
+    if (quickSession) {
+      if (quickSession.creatorLineUserId && quickSession.creatorLineUserId !== lineUserId) {
+        return "只有即刻算帳發起人可以移除成員。";
+      }
+
+      const target = quickSession.members.find(
+        (member) => normalizeName(member.displayName) === normalizeName(name)
+      );
+
+      if (!target) {
+        return `找不到成員：${name}`;
+      }
+
+      quickSession.members = quickSession.members.filter(
+        (member) => member.memberId !== target.memberId
+      );
+
+      return `已移除：${target.displayName}\n目前成員共 ${quickSession.members.length} 人：\n${listQuickSettlementMemberNames(quickSession).join("、") || "目前尚未有成員"}`;
+    }
+
     return getNoActiveLedgerText();
   }
 
@@ -894,7 +1338,7 @@ async function handleConfirmMembers(event: LineMessageEvent) {
 }
 
 async function handleListMembers(event: LineMessageEvent) {
-  const { chatType } = getChatContext(event.source);
+  const { chatId, chatType } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -908,6 +1352,18 @@ async function handleListMembers(event: LineMessageEvent) {
   const active = await getActiveLedgerParticipants(binding.group.id);
 
   if (!active.ledger) {
+    const quickSession = getQuickSettlementSession(chatId);
+    if (quickSession) {
+      if (quickSession.members.length === 0) {
+        return `目前活動：${quickSession.name}\n目前尚未有成員`;
+      }
+
+      return [
+        `目前活動：${quickSession.name}`,
+        `目前成員：${listQuickSettlementMemberNames(quickSession).join("、")}`
+      ].join("\n");
+    }
+
     return getNoActiveLedgerText();
   }
 
@@ -922,7 +1378,7 @@ async function handleListMembers(event: LineMessageEvent) {
 }
 
 async function handleCurrentLedger(event: LineMessageEvent) {
-  const { chatType } = getChatContext(event.source);
+  const { chatId, chatType } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -936,6 +1392,11 @@ async function handleCurrentLedger(event: LineMessageEvent) {
   const activeLedger = await getActiveLedger(binding.group.id);
 
   if (!activeLedger) {
+    const quickSession = getQuickSettlementSession(chatId);
+    if (quickSession) {
+      return `目前活動：${quickSession.name}`;
+    }
+
     return getNoActiveLedgerText();
   }
 
@@ -943,7 +1404,7 @@ async function handleCurrentLedger(event: LineMessageEvent) {
 }
 
 async function handleResetLedger(event: LineMessageEvent) {
-  const { chatType } = getChatContext(event.source);
+  const { chatId, chatType } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -964,7 +1425,7 @@ async function handleResetLedger(event: LineMessageEvent) {
 }
 
 async function handleGroupInfo(event: LineMessageEvent) {
-  const { chatType } = getChatContext(event.source);
+  const { chatId, chatType } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -989,7 +1450,7 @@ async function handleGroupInfo(event: LineMessageEvent) {
 }
 
 async function handleSwitchLedger(event: LineMessageEvent, name: string) {
-  const { chatType } = getChatContext(event.source);
+  const { chatId, chatType } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -1034,7 +1495,7 @@ async function handleListLedgers(event: LineMessageEvent) {
 }
 
 async function handleSettlement(event: LineMessageEvent) {
-  const { chatType } = getChatContext(event.source);
+  const { chatId, chatType } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -1048,6 +1509,16 @@ async function handleSettlement(event: LineMessageEvent) {
   const snapshot = await getSettlementSnapshot(binding.group.id);
 
   if (!snapshot?.activeLedger) {
+    const quickSession = getQuickSettlementSession(chatId);
+    if (quickSession) {
+      return [
+        `目前活動：${quickSession.name}`,
+        `目前成員：${listQuickSettlementMemberNames(quickSession).join("、") || "目前尚未有成員"}`,
+        "",
+        buildQuickSettlementReply(quickSession)
+      ].join("\n");
+    }
+
     return getNoActiveLedgerText();
   }
 
@@ -1191,11 +1662,15 @@ function resolveCustomShares(input: {
   };
 }
 
+function buildQuickSettlementReply(session: QuickSettlementSession) {
+  return buildSettlementBlock(buildQuickSettlementLines(session));
+}
+
 async function loadEqualExpenseContext(event: LineMessageEvent): Promise<
   | { ok: true; context: EqualExpenseContext }
   | { ok: false; text: string }
 > {
-  const { chatType, lineUserId } = getChatContext(event.source);
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
 
   if (chatType === "user") {
     return { ok: false, text: getGroupOnlyMessage() };
@@ -1208,7 +1683,33 @@ async function loadEqualExpenseContext(event: LineMessageEvent): Promise<
 
   const confirmed = await getConfirmedMemberIdsForActiveLedger(binding.group.id);
   if (!confirmed.ledger) {
-    return { ok: false, text: getNoActiveLedgerText() };
+    const quickSession = getQuickSettlementSession(chatId);
+
+    if (!quickSession) {
+      return { ok: false, text: getNoActiveLedgerText() };
+    }
+
+    const participants = buildQuickSettlementMemberRefs(quickSession);
+
+    if (participants.length === 0) {
+      return { ok: false, text: "目前尚未有成員，請先輸入 + 加入或手動新增成員。" };
+    }
+
+    const actorDisplayName = await resolveActorDisplayName(event);
+
+    return {
+      ok: true,
+      context: {
+        mode: "quick",
+        groupId: binding.group.id,
+        ledgerName: quickSession.name,
+        participants,
+        memberIds: participants.map((participant) => participant.memberId),
+        actorDisplayName,
+        lineUserId,
+        quickSession
+      }
+    };
   }
 
   if (confirmed.ledger.isCollectingMembers) {
@@ -1220,6 +1721,7 @@ async function loadEqualExpenseContext(event: LineMessageEvent): Promise<
   return {
     ok: true,
     context: {
+      mode: "ledger",
       groupId: binding.group.id,
       ledgerName: confirmed.ledger.name,
       participants: confirmed.participants,
@@ -1254,16 +1756,44 @@ async function createEqualExpenseEntry(
     };
   }
 
-  await createExpenseInGroup({
-    groupId: context.groupId,
-    title: input.title,
-    amount: input.amount,
-    payerId: payer.memberId,
-    participantIds: context.memberIds
-  });
-
   const amountCents = parseAmountToCents(input.amount);
-  const shareCents = Math.round(amountCents / context.memberIds.length);
+  const participantShares = splitAmountEvenly(amountCents, context.memberIds);
+
+  if (context.mode === "quick") {
+    const quickSession = context.quickSession;
+
+    if (!quickSession) {
+      return {
+        ok: false as const,
+        text: getNoActiveLedgerText()
+      };
+    }
+
+    quickSession.expenses.push({
+      title: input.title,
+      amountCents,
+      payerMemberId: payer.memberId,
+      payerDisplayName: payer.displayName,
+      participantShares: participantShares.map((share) => {
+        const participant = context.participants.find((item) => item.memberId === share.memberId);
+
+        return {
+          memberId: share.memberId,
+          memberName: participant?.displayName ?? participant?.memberName ?? "成員",
+          shareCents: share.shareCents
+        };
+      }),
+      createdAt: Date.now()
+    });
+  } else {
+    await createExpenseInGroup({
+      groupId: context.groupId,
+      title: input.title,
+      amount: input.amount,
+      payerId: payer.memberId,
+      participantIds: context.memberIds
+    });
+  }
 
   return {
     ok: true as const,
@@ -1271,7 +1801,7 @@ async function createEqualExpenseEntry(
     amountCents,
     payerDisplayName: payer.displayName,
     participantCount: context.memberIds.length,
-    shareCents
+    shareCents: participantShares[0]?.shareCents ?? 0
   };
 }
 
@@ -1292,7 +1822,21 @@ async function finalizeEqualExpense(input: {
     return created.text;
   }
 
-  const snapshot = await getSettlementSnapshot(contextResult.context.groupId);
+  if (contextResult.context.mode === "quick" && contextResult.context.quickSession) {
+    return [
+      `已新增支出：${input.title} ${formatAmountForDisplay(created.amountCents)}`,
+      "",
+      `付款人：${created.payerDisplayName}`,
+      `平均分攤：${created.participantCount}人，每人${formatAmountForDisplay(created.shareCents)}`,
+      "",
+      buildQuickSettlementReply(contextResult.context.quickSession)
+    ].join("\n");
+  }
+
+  const snapshot =
+    contextResult.context.mode === "quick"
+      ? null
+      : await getSettlementSnapshot(contextResult.context.groupId);
 
   const settlementLines =
     snapshot?.summary.settlement.map(
@@ -1452,7 +1996,28 @@ async function handleExpenseDraftStart(event: LineMessageEvent) {
 
   const confirmed = await getConfirmedMemberIdsForActiveLedger(binding.group.id);
   if (!confirmed.ledger) {
-    return getNoActiveLedgerText();
+    const quickSession = getQuickSettlementSession(chatId);
+    if (!quickSession) {
+      return getNoActiveLedgerText();
+    }
+
+    if (quickSession.members.length === 0) {
+      return "目前尚未有成員，請先輸入 + 加入或手動新增成員。";
+    }
+
+    await createPendingAction({
+      groupId: binding.group.id,
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: AWAITING_EXPENSE_DETAILS_ACTION,
+      payload: null,
+      ttlMinutes: 10
+    });
+
+    return withQuickReply(
+      [getAwaitingExpensePrompt(), "", "可連續輸入多筆，輸入【完成】或【結束】即可離開。"].join("\n"),
+      buildExpenseQuickReply()
+    );
   }
 
   if (confirmed.ledger.isCollectingMembers) {
@@ -1756,7 +2321,7 @@ async function handleExpenseDraftContinuation(
 }
 
 async function handleRecentExpenses(event: LineMessageEvent) {
-  const { chatType } = getChatContext(event.source);
+  const { chatId, chatType } = getChatContext(event.source);
 
   if (chatType === "user") {
     return getGroupOnlyMessage();
@@ -1770,6 +2335,31 @@ async function handleRecentExpenses(event: LineMessageEvent) {
   const result = await getRecentExpenses(binding.group.id, 5);
 
   if (!result.activeLedger) {
+    const quickSession = getQuickSettlementSession(chatId);
+    if (quickSession) {
+      if (quickSession.expenses.length === 0) {
+        return withQuickReply(
+          [`目前活動：${quickSession.name}`, "目前還沒有支出紀錄"].join("\n"),
+          buildExpenseQuickReply()
+        );
+      }
+
+      const totalExpenseCents = quickSession.expenses.reduce(
+        (sum, expense) => sum + expense.amountCents,
+        0
+      );
+
+      return withQuickReply(
+        [
+          `目前活動：${quickSession.name}`,
+          `目前消費總額：NT$ ${formatCents(totalExpenseCents)}`,
+          "最近支出：",
+          ...getQuickSettlementExpenseLines(quickSession)
+        ].join("\n\n"),
+        buildExpenseQuickReply()
+      );
+    }
+
     return getNoActiveLedgerText();
   }
 
@@ -1811,6 +2401,19 @@ async function handleDeleteLastExpense(event: LineMessageEvent) {
   const latestExpense = result.expenses[0];
 
   if (!latestExpense) {
+    const quickSession = getQuickSettlementSession(chatId);
+    const latestQuickExpense = quickSession?.expenses.at(-1);
+
+    if (latestQuickExpense && quickSession) {
+      quickSession.expenses.pop();
+
+      return [
+        `已刪除：${latestQuickExpense.title} ${formatAmountForDisplay(latestQuickExpense.amountCents)}`,
+        "",
+        buildQuickSettlementReply(quickSession)
+      ].join("\n");
+    }
+
     return "目前沒有可刪除的紀錄";
   }
 
@@ -2351,6 +2954,21 @@ async function handleMessageEvent(event: LineMessageEvent) {
   if (chatType !== "user" && isUrlLikeText(rawText)) {
     return null;
   }
+
+  if (chatType !== "user") {
+    if (rawText === QUICK_SETTLEMENT_NAME) {
+      return startQuickSettlement(event);
+    }
+
+    if (rawText === "結束即刻算帳" || rawText === "完成即刻算帳") {
+      return endQuickSettlement(chatId, false);
+    }
+
+    if (rawText === "取消即刻算帳") {
+      return endQuickSettlement(chatId, true);
+    }
+  }
+
   const parsed = parseLineCommand(event.message.text);
 
   if (chatType !== "user" && (parsed.kind === "join-activity" || parsed.kind === "leave-activity")) {
