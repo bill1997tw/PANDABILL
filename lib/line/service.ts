@@ -859,20 +859,35 @@ function shouldStartExpenseDraft(rawText: string, parsed: ParsedLineCommand) {
   return Boolean(parseExpenseDraftHeader(rawText));
 }
 
+function stripExpenseCommandPrefix(rawText: string) {
+  return rawText.replace(/^(新增支出|支出)\s*/u, "").trim();
+}
+
+function splitBatchExpenseInput(rawText: string) {
+  const normalized = stripExpenseCommandPrefix(rawText);
+
+  return normalized
+    .split(/[\r\n\/／]+/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 function parseExplicitExpenseWhileAwaiting(rawText: string) {
-  if (!rawText || rawText.length > 100) {
+  const normalized = stripExpenseCommandPrefix(rawText);
+
+  if (!normalized || normalized.length > 100) {
     return null;
   }
 
-  if (isUrlLikeText(rawText)) {
+  if (isUrlLikeText(normalized)) {
     return null;
   }
 
-  if (!/\d/.test(rawText) || !rawText.includes("付")) {
+  if (!/\d/.test(normalized)) {
     return null;
   }
 
-  return parseNaturalExpense(rawText);
+  return parseNaturalExpense(normalized);
 }
 
 function getExpenseNotAllowedText() {
@@ -2176,7 +2191,7 @@ async function handleBatchEqualExpenses(
     requireAtLeastOneValid?: boolean;
   }
 ) {
-  const lines = splitMultilineSegments(event.message.text);
+  const lines = splitBatchExpenseInput(event.message.text);
 
   if (lines.length < 2) {
     return null;
