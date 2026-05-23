@@ -500,7 +500,7 @@ export async function createExpenseInGroup(input: {
     throw new Error("目前沒有進行中的活動，請先輸入：建立活動 活動名稱");
   }
 
-  if (activeLedger.isCollectingMembers) {
+  if (activeLedger.isCollectingMembers && activeLedger.name !== "即刻算帳") {
     throw new Error("成員尚未確認，請先由活動建立者輸入「確認成員」。");
   }
 
