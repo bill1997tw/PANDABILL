@@ -1,21 +1,14 @@
 import type { ParsedLineCommand } from "@/lib/line/types";
 
 function normalize(text: string) {
-  return text.replace(/\s+/g, " ").trim();
+  return text.replace(/\s+/gu, " ").trim();
 }
 
-function parseShortcut(text: string): ParsedLineCommand | null {
-  const match = text.match(/^([1-8])\s*(.*)$/u);
-
-  if (!match) {
-    return null;
-  }
-
-  return {
-    kind: "shortcut",
-    number: Number(match[1]),
-    payload: match[2]?.trim() || undefined
-  };
+function splitNames(payload: string) {
+  return payload
+    .split(/\s+/u)
+    .map((name) => name.trim())
+    .filter(Boolean);
 }
 
 export function parseLineCommand(text: string): ParsedLineCommand {
@@ -30,174 +23,81 @@ export function parseLineCommand(text: string): ParsedLineCommand {
   }
 
   if (normalized === "算帳") {
-    return { kind: "settlement-help" };
-  }
-
-  if (
-    ["+", "+1", "++", "加入", "加入活動", "我要加入", "我要去", "參加"].includes(normalized)
-  ) {
-    return { kind: "join-activity" };
-  }
-
-  if (["-", "-1", "退出", "退出活動", "我要退出", "不去"].includes(normalized)) {
-    return { kind: "leave-activity" };
-  }
-
-  if (["是", "y", "Y", "yes", "YES"].includes(normalized)) {
-    return { kind: "confirm" };
-  }
-
-  if (["否", "取消", "不用了", "n", "N", "no", "NO"].includes(normalized)) {
-    return { kind: "cancel" };
-  }
-
-  if (/^(建立活動|建立帳本)(?:\s|$)/u.test(normalized)) {
-    return {
-      kind: "create-ledger",
-      name: normalized.replace(/^(建立活動|建立帳本)\s*/u, "").trim()
-    };
-  }
-
-  if (/^(加成員|新增成員|追加成員|手動追加成員|手動新增成員)(?:\s|$)/u.test(normalized)) {
-    const payload = normalized
-      .replace(/^(加成員|新增成員|追加成員|手動追加成員|手動新增成員)\s*/u, "")
-      .trim();
-    const names = payload
-      .split(/\s+/u)
-      .map((name) => name.trim())
-      .filter(Boolean);
-
-    if (names.length > 0) {
-      return { kind: "add-members", names };
-    }
-  }
-
-  if (/^(移除成員|刪除成員|移出成員)(?:\s|$)/u.test(normalized)) {
-    const name = normalized.replace(/^(移除成員|刪除成員|移出成員)\s*/u, "").trim();
-    if (name) {
-      return { kind: "remove-member", name };
-    }
-  }
-
-  if (/^(切換活動|切換帳本)(?:\s|$)/u.test(normalized)) {
-    return {
-      kind: "switch-ledger",
-      name: normalized.replace(/^(切換活動|切換帳本)\s*/u, "").trim()
-    };
-  }
-
-  if (normalized === "目前活動" || normalized === "目前帳本") {
-    return { kind: "current-ledger" };
-  }
-
-  if (normalized === "重置活動") {
-    return { kind: "reset-ledger" };
-  }
-
-  if (normalized === "群組資訊") {
-    return { kind: "group-info" };
-  }
-
-  if (["查看帳本", "帳本", "帳本列表", "查看活動"].includes(normalized)) {
-    return { kind: "list-ledgers" };
-  }
-
-  if (["確認成員", "4確認成員", "4 確認成員"].includes(normalized)) {
-    return { kind: "confirm-members" };
-  }
-
-  if (["查看成員", "成員名單", "成員", "3查看成員", "3 查看成員"].includes(normalized)) {
-    return { kind: "list-members" };
-  }
-
-  if (
-    ["查看支出", "查看目前支出", "最近支出", "7查看目前支出", "7 查看目前支出"].includes(
-      normalized
-    )
-  ) {
-    return { kind: "recent-expenses" };
-  }
-
-  if (normalized === "新增支出" || normalized === "6新增支出" || normalized === "6 新增支出") {
-    return { kind: "expense-help" };
-  }
-
-  if (normalized === "支出") {
-    return { kind: "expense-help", useLegacyAlias: true };
-  }
-
-  if (
-    ["刪除上一筆", "刪除最近一筆支出", "撤銷", "8刪除上一筆", "8 刪除上一筆"].includes(
-      normalized
-    )
-  ) {
-    return { kind: "delete-last-expense" };
-  }
-
-  if (
-    ["帳本結算", "查看結算", "結算"].includes(normalized) ||
-    /^2\s*帳本結算$/u.test(normalized)
-  ) {
     return { kind: "settlement" };
   }
 
-  if (["查看目前結算", "目前結算"].includes(normalized)) {
-    return { kind: "current-settlement" };
+  if (normalized === "新增支出" || normalized.startsWith("新增支出 ")) {
+    return { kind: "expense-help" };
   }
 
-  if (normalized === "代墊MVP" || normalized === "代墊 MVP" || /^3\s*代墊\s*MVP$/u.test(normalized)) {
-    return { kind: "mvp" };
+  if (normalized === "查看目前支出" || normalized === "查看支出") {
+    return { kind: "recent-expenses" };
   }
 
-  if (
-    ["結束活動", "結束活動同時封存帳本", "結束活動並封存帳本"].includes(normalized) ||
-    /^5\s*結束活動同時封存帳本$/u.test(normalized)
-  ) {
-    return { kind: "close-ledger" };
+  if (normalized === "刪除支出") {
+    return { kind: "delete-last-expense" };
   }
 
-  if (
-    ["查看封存帳本", "查看歷史帳本", "查看封存活動"].includes(normalized) ||
-    /^4\s*查看封存帳本$/u.test(normalized)
-  ) {
-    return { kind: "list-archived-ledgers" };
+  if (normalized === "確認成員") {
+    return { kind: "confirm-members" };
   }
 
-  if (/^(封存帳本|封存活動)(?:\s|$)/u.test(normalized)) {
-    return {
-      kind: "archive-ledger",
-      name: normalized.replace(/^(封存帳本|封存活動)\s*/u, "").trim()
-    };
-  }
-
-  if (["5設定收款", "5 設定收款", "設定", "設定收款方式", "設定收款"].includes(normalized)) {
+  if (normalized === "設定收款方式" || normalized === "設定") {
     return { kind: "start-payment-setup" };
   }
 
-  if (/^我是.+/u.test(normalized)) {
+  if (normalized === "+" || normalized === "+1" || normalized === "加入") {
+    return { kind: "join-activity" };
+  }
+
+  if (normalized === "-" || normalized === "-1" || normalized === "退出") {
+    return { kind: "leave-activity" };
+  }
+
+  if (normalized === "取消") {
+    return { kind: "cancel" };
+  }
+
+  if (normalized === "建立活動") {
+    return { kind: "create-ledger-help" };
+  }
+
+  if (normalized.startsWith("建立活動 ")) {
     return {
-      kind: "identify-self",
-      name: normalized.replace(/^我是/u, "").trim()
+      kind: "create-ledger",
+      name: normalized.replace(/^建立活動\s*/u, "").trim()
     };
   }
 
-  if (/^建立群組(?:\s|$)/u.test(normalized)) {
+  const shortcutCreate = normalized.match(/^1\s+(.+)$/u);
+  if (shortcutCreate?.[1]) {
     return {
-      kind: "create-group",
-      name: normalized.replace(/^建立群組\s*/u, "").trim()
+      kind: "create-ledger",
+      name: shortcutCreate[1].trim()
     };
   }
 
-  if (/^綁定群組(?:\s|$)/u.test(normalized)) {
-    return {
-      kind: "bind",
-      target: normalized.replace(/^綁定群組\s*/u, "").trim()
-    };
+  if (normalized === "5") {
+    return { kind: "expense-help" };
   }
 
-  const shortcut = parseShortcut(normalized);
-  if (shortcut) {
-    return shortcut;
+  if (normalized === "6") {
+    return { kind: "recent-expenses" };
+  }
+
+  if (normalized === "7") {
+    return { kind: "delete-last-expense" };
+  }
+
+  if (normalized.startsWith("新增成員 ") || normalized.startsWith("加成員 ")) {
+    const payload = normalized.replace(/^(新增成員|加成員)\s*/u, "").trim();
+    const names = splitNames(payload);
+    return names.length > 0 ? { kind: "add-members", names } : { kind: "ignored" };
+  }
+
+  if (normalized.startsWith("刪除成員 ") || normalized.startsWith("移除成員 ")) {
+    const name = normalized.replace(/^(刪除成員|移除成員)\s*/u, "").trim();
+    return name ? { kind: "remove-member", name } : { kind: "ignored" };
   }
 
   return { kind: "ignored" };

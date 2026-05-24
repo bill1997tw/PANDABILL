@@ -1,166 +1,164 @@
-export type ParsedExpenseIntent = {
-  title: string;
-  amount: string;
-  payerName?: string;
-  payerIsSender?: boolean;
+export type ExpenseParseError = {
+  block: string;
+  reason: string;
 };
 
-export type ParsedExpenseDraftHeader = {
+export type ParsedExpenseBlock = {
   title: string;
   amount: string;
-};
-
-export type ParsedExpensePayerLine = {
   payerName: string;
   payerIsSender: boolean;
+  participantNames: string[] | null;
+  shares: Array<{
+    name: string;
+    amount: string;
+  }>;
 };
 
-export type ParsedExpenseShareLine = {
-  participantName: string;
-  amount: string;
-};
-
-function normalizeWhitespace(text: string) {
-  return text.replace(/\s+/g, " ").trim();
+function compact(text: string) {
+  return text.replace(/\s+/gu, " ").trim();
 }
 
-function cleanTitle(value: string) {
-  return value.replace(/^(新增支出|支出)/u, "").replace(/^[:：]/u, "").trim();
+function stripExpensePrefix(text: string) {
+  return text.replace(/^新增支出\s*/u, "").trim();
 }
 
-function buildParsedExpense(
-  title: string,
-  amount: string,
-  options?: {
-    payerName?: string;
-    payerIsSender?: boolean;
-  }
-): ParsedExpenseIntent | null {
-  const clean = cleanTitle(title);
-
-  if (!clean || !amount) {
-    return null;
-  }
-
-  return {
-    title: clean,
-    amount,
-    payerName: options?.payerName,
-    payerIsSender: options?.payerIsSender
-  };
+export function splitExpenseBlocks(text: string) {
+  return stripExpensePrefix(text)
+    .split(/[\/／]+/u)
+    .map((block) => compact(block))
+    .filter(Boolean);
 }
 
-export function parseNaturalExpense(text: string): ParsedExpenseIntent | null {
-  const normalized = normalizeWhitespace(text);
-
-  if (!normalized || normalized.includes("\n")) {
-    return null;
-  }
-
-  const senderPaid = normalized.match(/^(?<title>.+?)(?<amount>\d+)\s*(我付|我出|我墊)$/u);
-  if (senderPaid?.groups) {
-    return buildParsedExpense(senderPaid.groups.title, senderPaid.groups.amount, {
-      payerIsSender: true
-    });
-  }
-
-  const namedPaid = normalized.match(
-    /^(?<title>.+?)(?<amount>\d+)\s*(?<payer>[\p{Script=Han}A-Za-z0-9_]{1,20})付$/u
+function parseByAmountBeforePayer(block: string) {
+  return block.match(
+    /^(?<title>[^\d\s\/／]+?)\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?<payer>[^\d\s\/／]+?)付(?<tail>.*)$/u
   );
-  if (namedPaid?.groups) {
-    return buildParsedExpense(namedPaid.groups.title, namedPaid.groups.amount, {
-      payerName: namedPaid.groups.payer
-    });
-  }
+}
 
-  const senderFront = normalized.match(/^(我付|我出|我墊)(?<title>.+?)(?<amount>\d+)$/u);
-  if (senderFront?.groups) {
-    return buildParsedExpense(senderFront.groups.title, senderFront.groups.amount, {
-      payerIsSender: true
-    });
-  }
-
-  const namedFront = normalized.match(
-    /^(?<payer>[\p{Script=Han}A-Za-z0-9_]{1,20})付(?<title>.+?)(?<amount>\d+)$/u
+function parseByPayerBeforeAmount(block: string) {
+  return block.match(
+    /^(?<title>.+?)(?<payer>我|[^\d\s\/／]+?)付\s*(?<amount>\d+(?:\.\d{1,2})?)(?<tail>.*)$/u
   );
-  if (namedFront?.groups) {
-    return buildParsedExpense(namedFront.groups.title, namedFront.groups.amount, {
-      payerName: namedFront.groups.payer
+}
+
+function parseShares(tail: string) {
+  const shares: ParsedExpenseBlock["shares"] = [];
+  const regex = /(\d+(?:\.\d{1,2})?)\s*([^\d\s\/／]+)/gu;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(tail)) !== null) {
+    shares.push({
+      amount: match[1] ?? "",
+      name: match[2]?.trim() ?? ""
     });
   }
 
-  const headerOnly = normalized.match(/^(?<title>.+?)(?<amount>\d+)$/u);
-  if (headerOnly?.groups) {
-    return buildParsedExpense(headerOnly.groups.title, headerOnly.groups.amount, {
-      payerIsSender: true
-    });
-  }
-
-  return null;
+  return shares.filter((share) => share.amount && share.name);
 }
 
-export function parseExpenseDraftHeader(text: string): ParsedExpenseDraftHeader | null {
-  const normalized = normalizeWhitespace(text);
-  const match = normalized.match(/^(?<title>.+?)(?<amount>\d+)$/u);
-
-  if (!match?.groups) {
-    return null;
-  }
-
-  const title = cleanTitle(match.groups.title);
-  if (!title) {
-    return null;
-  }
-
-  return {
-    title,
-    amount: match.groups.amount
-  };
-}
-
-export function parseExpensePayerLine(text: string): ParsedExpensePayerLine | null {
-  const normalized = normalizeWhitespace(text);
+function parseParticipantNames(tail: string) {
+  const normalized = compact(tail).replace(/分$/u, "").trim();
 
   if (!normalized) {
     return null;
   }
 
-  if (normalized === "我付" || normalized === "我出" || normalized === "我墊") {
+  if (/\d/u.test(normalized)) {
+    return null;
+  }
+
+  return normalized.split(/\s+/u).map((name) => name.trim()).filter(Boolean);
+}
+
+export function parseExpenseBlock(block: string): ParsedExpenseBlock | ExpenseParseError {
+  const normalized = compact(block);
+
+  if (!normalized) {
     return {
-      payerName: "我",
-      payerIsSender: true
+      block,
+      reason: "空白內容"
     };
   }
 
-  const match = normalized.match(/^(?<payer>.+?)付$/u);
-  if (!match?.groups?.payer) {
-    return null;
+  if (/https?:\/\//iu.test(normalized)) {
+    return {
+      block,
+      reason: "網址不會被記帳"
+    };
   }
 
-  const payerName = match.groups.payer.trim();
+  if (!normalized.includes("付")) {
+    return {
+      block,
+      reason: "缺少付款人"
+    };
+  }
+
+  const match = parseByAmountBeforePayer(normalized) ?? parseByPayerBeforeAmount(normalized);
+
+  if (!match?.groups) {
+    return {
+      block,
+      reason: "格式不正確"
+    };
+  }
+
+  const title = compact(match.groups.title ?? "");
+  const amount = match.groups.amount ?? "";
+  const payerName = compact(match.groups.payer ?? "");
+  const tail = compact(match.groups.tail ?? "");
+
+  if (!title) {
+    return {
+      block,
+      reason: "缺少項目名稱"
+    };
+  }
+
+  if (!amount) {
+    return {
+      block,
+      reason: "缺少金額"
+    };
+  }
+
+  if (!payerName) {
+    return {
+      block,
+      reason: "缺少付款人"
+    };
+  }
+
+  const shares = parseShares(tail);
+
+  if (shares.length > 0) {
+    return {
+      title,
+      amount,
+      payerName,
+      payerIsSender: payerName === "我",
+      participantNames: null,
+      shares
+    };
+  }
+
   return {
+    title,
+    amount,
     payerName,
-    payerIsSender: payerName === "我"
+    payerIsSender: payerName === "我",
+    participantNames: parseParticipantNames(tail),
+    shares: []
   };
 }
 
-export function parseExpenseShareLine(text: string): ParsedExpenseShareLine | null {
-  const normalized = normalizeWhitespace(text);
-  const match = normalized.match(/^(?<amount>\d+)\s*(?<name>.+)$/u);
+export function looksLikeExpenseInput(text: string) {
+  const normalized = compact(text);
 
-  if (!match?.groups?.name) {
-    return null;
+  if (/https?:\/\//iu.test(normalized)) {
+    return false;
   }
 
-  return {
-    amount: match.groups.amount,
-    participantName: match.groups.name.trim()
-  };
-}
-
-export function splitMultilineSegments(text: string) {
-  return text
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  return normalized.includes("付") && /\d/u.test(normalized);
 }
