@@ -45,6 +45,13 @@ type ExpenseWithRelations = Prisma.ExpenseGetPayload<{
   };
 }>;
 
+type RepaymentWithRelations = Prisma.RepaymentGetPayload<{
+  include: {
+    payer: true;
+    receiver: true;
+  };
+}>;
+
 function formatAmountForDisplay(cents: number) {
   return cents % 100 === 0 ? String(cents / 100) : formatCents(cents);
 }
@@ -214,6 +221,21 @@ async function loadLedgerExpenses(ledgerId: string) {
           createdAt: "asc"
         }
       }
+    },
+    orderBy: {
+      createdAt: "desc"
+    }
+  });
+}
+
+async function loadLedgerRepayments(ledgerId: string) {
+  return db.repayment.findMany({
+    where: {
+      ledgerId
+    },
+    include: {
+      payer: true,
+      receiver: true
     },
     orderBy: {
       createdAt: "desc"
@@ -399,7 +421,12 @@ export async function getGroupDetail(groupId: string) {
     getActiveLedgerParticipants(groupId)
   ]);
 
-  const activeLedgerExpenses = activeLedger ? await loadLedgerExpenses(activeLedger.id) : [];
+  const [activeLedgerExpenses, activeLedgerRepayments] = activeLedger
+    ? await Promise.all([
+        loadLedgerExpenses(activeLedger.id),
+        loadLedgerRepayments(activeLedger.id)
+      ])
+    : [[], []];
   const activeMembers = activeParticipants.participants.map((participant) => participant.member);
   const summary =
     activeLedger && activeMembers.length > 0
@@ -408,7 +435,8 @@ export async function getGroupDetail(groupId: string) {
           name: group.name ?? getDefaultGroupName(group.lineGroupId ?? group.id),
           createdAt: group.createdAt,
           members: activeMembers,
-          expenses: activeLedgerExpenses
+          expenses: activeLedgerExpenses,
+          repayments: activeLedgerRepayments
         })
       : emptySummary();
 
@@ -583,6 +611,72 @@ export async function createExpenseInGroup(input: {
   };
 }
 
+export async function createRepaymentInGroup(input: {
+  groupId: string;
+  amount: unknown;
+  payerId: unknown;
+  receiverId: unknown;
+}) {
+  const amountCents = parseAmountToCents(String(input.amount));
+  const payerId = assertNonEmptyString(input.payerId, "還款人");
+  const receiverId = assertNonEmptyString(input.receiverId, "收款人");
+
+  if (payerId === receiverId) {
+    throw new Error("還款人與收款人不能是同一人。");
+  }
+
+  const group = await getGroupWithMembers(input.groupId);
+
+  if (!group) {
+    throw new Error("找不到這個群組。");
+  }
+
+  const activeLedger = await getActiveLedger(input.groupId);
+
+  if (!activeLedger) {
+    throw new Error("目前沒有進行中的活動，請先輸入：建立活動 活動名稱");
+  }
+
+  if (activeLedger.isCollectingMembers) {
+    throw new Error("成員尚未確認，請先由活動建立者輸入「確認成員」。");
+  }
+
+  const activeParticipants = await db.ledgerParticipant.findMany({
+    where: {
+      ledgerId: activeLedger.id,
+      isActive: true
+    }
+  });
+  const validMemberIds = new Set(activeParticipants.map((participant) => participant.memberId));
+
+  if (!validMemberIds.has(payerId)) {
+    throw new Error("還款人不在目前活動成員中。");
+  }
+
+  if (!validMemberIds.has(receiverId)) {
+    throw new Error("收款人不在目前活動成員中。");
+  }
+
+  const repayment = await db.repayment.create({
+    data: {
+      amountCents,
+      groupId: input.groupId,
+      ledgerId: activeLedger.id,
+      payerId,
+      receiverId
+    },
+    include: {
+      payer: true,
+      receiver: true
+    }
+  });
+
+  return {
+    activeLedger,
+    repayment
+  };
+}
+
 export async function getRecentExpenses(groupId: string, take = 5) {
   const activeLedger = await getActiveLedger(groupId);
 
@@ -632,6 +726,36 @@ export async function getRecentExpenses(groupId: string, take = 5) {
   };
 }
 
+export async function getRecentRepayments(groupId: string, take = 50) {
+  const activeLedger = await getActiveLedger(groupId);
+
+  if (!activeLedger) {
+    return {
+      activeLedger: null,
+      repayments: [] as RepaymentWithRelations[]
+    };
+  }
+
+  const repayments = await db.repayment.findMany({
+    where: {
+      ledgerId: activeLedger.id
+    },
+    take,
+    orderBy: {
+      createdAt: "desc"
+    },
+    include: {
+      payer: true,
+      receiver: true
+    }
+  });
+
+  return {
+    activeLedger,
+    repayments
+  };
+}
+
 export async function calculateSettlement(sessionId: string) {
   const ledger = await db.ledger.findUnique({
     where: {
@@ -662,13 +786,17 @@ export async function calculateSettlement(sessionId: string) {
     }
   });
 
-  const expenses = await loadLedgerExpenses(sessionId);
+  const [expenses, repayments] = await Promise.all([
+    loadLedgerExpenses(sessionId),
+    loadLedgerRepayments(sessionId)
+  ]);
   const summary = buildGroupSummary({
     id: group.id,
     name: group.name ?? getDefaultGroupName(group.lineGroupId ?? group.id),
     createdAt: group.createdAt,
     members: activeMembers.map((participant) => participant.member),
-    expenses
+    expenses,
+    repayments
   });
 
   return {
@@ -694,7 +822,10 @@ export async function getSettlementSnapshot(groupId: string) {
     };
   }
 
-  const expenses = await loadLedgerExpenses(activeLedger.id);
+  const [expenses, repayments] = await Promise.all([
+    loadLedgerExpenses(activeLedger.id),
+    loadLedgerRepayments(activeLedger.id)
+  ]);
   const activeMembers = participants.map((participant) => participant.member);
   const summary =
     activeMembers.length > 0
@@ -703,7 +834,8 @@ export async function getSettlementSnapshot(groupId: string) {
           name: group.name ?? getDefaultGroupName(group.lineGroupId ?? group.id),
           createdAt: group.createdAt,
           members: activeMembers,
-          expenses
+          expenses,
+          repayments
         })
       : emptySummary();
 

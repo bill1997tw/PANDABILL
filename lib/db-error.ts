@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 const SAFE_DATABASE_ERROR_MESSAGE =
   "\u5c0f\u4e8c\u66ab\u6642\u9023\u7dda\u4e0d\u7a69\uff0c\u8acb\u7a0d\u5f8c\u518d\u8a66\u3002";
+const SAFE_OPERATION_ERROR_MESSAGE = "操作失敗，請確認格式後再試。";
 
 function hasDatabaseMessage(value: unknown) {
   if (!(value instanceof Error)) {
@@ -29,5 +30,9 @@ export function getSafeUserErrorMessage(error: unknown) {
     return SAFE_DATABASE_ERROR_MESSAGE;
   }
 
-  return SAFE_DATABASE_ERROR_MESSAGE;
+  if (error instanceof Error && /[\u3400-\u9fff]/u.test(error.message)) {
+    return error.message;
+  }
+
+  return SAFE_OPERATION_ERROR_MESSAGE;
 }

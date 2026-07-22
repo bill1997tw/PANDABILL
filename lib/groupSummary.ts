@@ -1,4 +1,4 @@
-import type { Expense, ExpenseParticipant, Member } from "@prisma/client";
+import type { Expense, ExpenseParticipant, Member, Repayment } from "@prisma/client";
 
 import { formatCents } from "@/lib/currency";
 import { simplifyDebts, type BalanceEntry } from "@/lib/calcSettlement";
@@ -10,12 +10,18 @@ type ExpenseWithRelations = Expense & {
   })[];
 };
 
+type RepaymentWithRelations = Repayment & {
+  payer: Member;
+  receiver: Member;
+};
+
 type GroupWithRelations = {
   id: string;
   name: string;
   createdAt: Date;
   members: Member[];
   expenses: ExpenseWithRelations[];
+  repayments?: RepaymentWithRelations[];
 };
 
 export function buildGroupSummary(group: GroupWithRelations) {
@@ -60,6 +66,19 @@ export function buildGroupSummary(group: GroupWithRelations) {
       member.owedCents += participant.shareCents;
       member.balanceCents -= participant.shareCents;
     }
+  }
+
+  for (const repayment of group.repayments ?? []) {
+    const payer = memberMap.get(repayment.payerId);
+    const receiver = memberMap.get(repayment.receiverId);
+
+    if (!payer || !receiver) {
+      continue;
+    }
+
+    // A repayment reduces the payer's debt and the receiver's credit equally.
+    payer.balanceCents += repayment.amountCents;
+    receiver.balanceCents -= repayment.amountCents;
   }
 
   const balances = Array.from(memberMap.values()).map((member) => ({

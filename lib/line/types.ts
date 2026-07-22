@@ -56,5 +56,7 @@ export type ParsedLineCommand =
   | { kind: "delete-last-expense" }
   | { kind: "recent-expenses" }
   | { kind: "expense-help" }
+  | { kind: "repayment-help" }
+  | { kind: "repayment"; text: string }
   | { kind: "start-payment-setup" }
   | { kind: "view-payment-settings" };

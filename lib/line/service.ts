@@ -17,6 +17,10 @@ import {
   type ParsedExpenseBlock
 } from "@/lib/commands/expense";
 import {
+  getRepaymentGuideText,
+  parseRepaymentInput
+} from "@/lib/commands/repayment";
+import {
   getExpenseGuideText,
   getPaymentSetupGuideText,
   getSettlementMenuText,
@@ -36,13 +40,16 @@ import {
 import { getMvpText, getSettlementSummaryText } from "@/lib/commands/settlement";
 import { formatCents, parseAmountToCents } from "@/lib/currency";
 import { db } from "@/lib/db";
+import { isDatabaseError } from "@/lib/db-error";
 import {
   createExpenseInGroup,
+  createRepaymentInGroup,
   getActiveLedgerExpenseMvp,
   getConfirmedMemberIdsForActiveLedger,
   getMembersMissingPaymentMethod,
   getOrCreateGroupContext,
   getRecentExpenses,
+  getRecentRepayments,
   getSettlementSnapshot
 } from "@/lib/group-service";
 import {
@@ -1067,11 +1074,35 @@ async function handleExpenseInput(event: LineMessageEvent, text: string) {
       continue;
     }
 
-    const result = await createParsedExpense({
-      groupId: group.groupId,
-      event,
-      parsed
-    });
+    const zeroShare = parsed.shares.find((share) => Number(share.amount) === 0);
+
+    if (zeroShare) {
+      failures.push({
+        block,
+        reason: `若要記錄中途還款，請輸入：還款${parsed.amount}${parsed.payerName}給${zeroShare.name}`
+      });
+      continue;
+    }
+
+    let result: Awaited<ReturnType<typeof createParsedExpense>>;
+
+    try {
+      result = await createParsedExpense({
+        groupId: group.groupId,
+        event,
+        parsed
+      });
+    } catch (error) {
+      if (isDatabaseError(error)) {
+        throw error;
+      }
+
+      failures.push({
+        block,
+        reason: error instanceof Error ? error.message : "建立支出失敗。"
+      });
+      continue;
+    }
 
     if (!result.ok) {
       failures.push({
@@ -1134,6 +1165,95 @@ async function handleExpenseInput(event: LineMessageEvent, text: string) {
   return replyLines.join("\n");
 }
 
+async function handleRepaymentInput(event: LineMessageEvent, text: string) {
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const parsed = parseRepaymentInput(text);
+
+  if ("reason" in parsed) {
+    return [parsed.reason, "", getRepaymentGuideText()].join("\n");
+  }
+
+  const { lineUserId } = getChatContext(event.source);
+  const actorDisplayName = await resolveActorDisplayName(event);
+  const active = await getConfirmedMemberIdsForActiveLedger(group.groupId);
+
+  if (!active.ledger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (active.ledger.isCollectingMembers) {
+    return "成員尚未確認，請先由活動建立者輸入「確認成員」。";
+  }
+
+  const payer = resolveMemberByName(active.participants, parsed.payerName, {
+    lineUserId,
+    actorDisplayName
+  });
+
+  if (!payer.ok) {
+    return payer.reason;
+  }
+
+  const receiver = resolveMemberByName(active.participants, parsed.receiverName, {
+    lineUserId,
+    actorDisplayName
+  });
+
+  if (!receiver.ok) {
+    return receiver.reason;
+  }
+
+  if (payer.member.memberId === receiver.member.memberId) {
+    return "還款人與收款人不能是同一人。";
+  }
+
+  const amountCents = parseAmountToCents(parsed.amount);
+  const beforeSnapshot = await getSettlementSnapshot(group.groupId);
+  const outstanding = beforeSnapshot?.summary.settlement.find(
+    (item) =>
+      item.fromMemberId === payer.member.memberId &&
+      item.toMemberId === receiver.member.memberId
+  );
+
+  if (!outstanding) {
+    return `目前結算中沒有「${payer.member.displayName} → ${receiver.member.displayName}」的待還款項。`;
+  }
+
+  if (amountCents > outstanding.amountCents) {
+    return [
+      "還款金額超過目前待還金額。",
+      "",
+      `目前待還：${outstanding.amountDisplay}`,
+      `本次輸入：${formatCents(amountCents)}`
+    ].join("\n");
+  }
+
+  await createRepaymentInGroup({
+    groupId: group.groupId,
+    amount: parsed.amount,
+    payerId: payer.member.memberId,
+    receiverId: receiver.member.memberId
+  });
+
+  const remainingCents = outstanding.amountCents - amountCents;
+  const afterSnapshot = await getSettlementSnapshot(group.groupId);
+
+  return [
+    "已記錄還款：",
+    `${payer.member.displayName} → ${receiver.member.displayName} ${formatCents(amountCents)}`,
+    "",
+    `原待還：${outstanding.amountDisplay}`,
+    remainingCents > 0 ? `剩餘：${formatCents(remainingCents)}` : "此筆已還清。",
+    "",
+    buildSettlementText(buildSettlementLines(afterSnapshot))
+  ].join("\n");
+}
+
 async function handleRecentExpenses(event: LineMessageEvent) {
   const group = await getGroupIdOrReply(event);
 
@@ -1141,7 +1261,10 @@ async function handleRecentExpenses(event: LineMessageEvent) {
     return group.reply;
   }
 
-  const recent = await getRecentExpenses(group.groupId, 50);
+  const [recent, recentRepayments] = await Promise.all([
+    getRecentExpenses(group.groupId, 50),
+    getRecentRepayments(group.groupId, 50)
+  ]);
 
   if (!recent.activeLedger) {
     return getNoActiveLedgerText();
@@ -1152,12 +1275,18 @@ async function handleRecentExpenses(event: LineMessageEvent) {
     expenses.length > 0
       ? expenses.map((expense) => `${expense.title}${formatAmountForDisplay(expense.amountCents)}`)
       : ["目前沒有支出。"];
+  const repayments = [...recentRepayments.repayments].reverse();
+  const repaymentLines = repayments.map(
+    (repayment) =>
+      `${repayment.payer.name} → ${repayment.receiver.name} ${formatCents(repayment.amountCents)}`
+  );
   const snapshot = await getSettlementSnapshot(group.groupId);
 
   return [
     "目前支出：",
     "",
     ...expenseLines,
+    ...(repaymentLines.length > 0 ? ["", "還款紀錄：", "", ...repaymentLines] : []),
     "",
     buildSettlementText(buildSettlementLines(snapshot))
   ].join("\n");
@@ -1699,6 +1828,12 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
 
       return getExpenseGuideText();
     }
+
+    case "repayment-help":
+      return getRepaymentGuideText();
+
+    case "repayment":
+      return handleRepaymentInput(event, parsed.text);
 
     case "recent-expenses":
       return handleRecentExpenses(event);

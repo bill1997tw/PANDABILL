@@ -32,6 +32,14 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "ignored" };
   }
 
+  if (normalized === "還款") {
+    return { kind: "repayment-help" };
+  }
+
+  if (normalized.startsWith("還款")) {
+    return { kind: "repayment", text: normalized };
+  }
+
   if (normalized === "小二") {
     return { kind: "xiaoer-help" };
   }

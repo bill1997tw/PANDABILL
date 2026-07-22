@@ -44,6 +44,7 @@ model Group {
   ledgers        Ledger[]          @relation("GroupSessions")
   currentSession Ledger?           @relation("CurrentGroupSession", fields: [currentSessionId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   expenses       Expense[]
+  repayments     Repayment[]
   lineBindings   LineChatBinding[]
   pendingActions PendingAction[]
   menuContexts MenuContext[]
@@ -65,6 +66,7 @@ model Ledger {
   group               Group        @relation("GroupSessions", fields: [groupId], references: [id], onDelete: Cascade)
   currentForGroups    Group[]      @relation("CurrentGroupSession")
   expenses            Expense[]
+  repayments          Repayment[]
   participants        LedgerParticipant[]
 
   @@unique([groupId, name])
@@ -83,6 +85,8 @@ model Member {
   group                Group                 @relation(fields: [groupId], references: [id], onDelete: Cascade)
   paidExpenses         Expense[]             @relation("ExpensePayer")
   participations       ExpenseParticipant[]
+  repaymentsMade       Repayment[]           @relation("RepaymentPayer")
+  repaymentsReceived   Repayment[]           @relation("RepaymentReceiver")
   paymentProfile       MemberPaymentProfile?
   ledgerParticipants   LedgerParticipant[]
 
@@ -154,6 +158,25 @@ model ExpenseParticipant {
 
   @@unique([expenseId, memberId])
   @@index([memberId, createdAt])
+}
+
+model Repayment {
+  id         String   @id @default(cuid())
+  amountCents Int
+  createdAt  DateTime @default(now())
+  groupId    String
+  ledgerId   String
+  payerId    String
+  receiverId String
+  group      Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  ledger     Ledger   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  payer      Member   @relation("RepaymentPayer", fields: [payerId], references: [id], onDelete: Restrict)
+  receiver   Member   @relation("RepaymentReceiver", fields: [receiverId], references: [id], onDelete: Restrict)
+
+  @@index([groupId, createdAt])
+  @@index([ledgerId, createdAt])
+  @@index([payerId])
+  @@index([receiverId])
 }
 
 model LedgerParticipant {

@@ -36,9 +36,21 @@ function parseByAmountBeforePayer(block: string) {
   );
 }
 
+function parseSeparatedAmountBeforePayer(block: string) {
+  return block.match(
+    /^(?<title>[^\/／]+?)\s+(?<amount>\d+(?:\.\d{1,2})?)\s*(?<payer>[^\d\s\/／]+?)付(?<tail>.*)$/u
+  );
+}
+
 function parseByPayerBeforeAmount(block: string) {
   return block.match(
     /^(?<title>.+?)(?<payer>我|[^\d\s\/／]+?)付\s*(?<amount>\d+(?:\.\d{1,2})?)(?<tail>.*)$/u
+  );
+}
+
+function parseSeparatedPayerBeforeAmount(block: string) {
+  return block.match(
+    /^(?<title>[^\/／]+?)\s+(?<payer>我|[^\d\s\/／]+?)付\s*(?<amount>\d+(?:\.\d{1,2})?)(?<tail>.*)$/u
   );
 }
 
@@ -95,7 +107,11 @@ export function parseExpenseBlock(block: string): ParsedExpenseBlock | ExpensePa
     };
   }
 
-  const match = parseByAmountBeforePayer(normalized) ?? parseByPayerBeforeAmount(normalized);
+  const match =
+    parseSeparatedAmountBeforePayer(normalized) ??
+    parseSeparatedPayerBeforeAmount(normalized) ??
+    parseByAmountBeforePayer(normalized) ??
+    parseByPayerBeforeAmount(normalized);
 
   if (!match?.groups) {
     return {
