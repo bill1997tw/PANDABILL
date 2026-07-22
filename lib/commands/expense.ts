@@ -32,7 +32,7 @@ export function splitExpenseBlocks(text: string) {
 
 function parseByAmountBeforePayer(block: string) {
   return block.match(
-    /^(?<title>[^\d\s\/／]+?)\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?<payer>[^\d\s\/／]+?)付(?<tail>.*)$/u
+    /^(?<title>[^\/／]*\D)\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?<payer>[^\d\s\/／]+?)付(?<tail>.*)$/u
   );
 }
 
