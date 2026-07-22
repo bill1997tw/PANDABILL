@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { PendingActionType, Prisma } from "@prisma/client";
 
 import {
   formatPaymentSummary,
@@ -19,12 +19,26 @@ import {
 import {
   getExpenseGuideText,
   getPaymentSetupGuideText,
+  getSettlementMenuText,
   getXiaoerMenuText
 } from "@/lib/commands/help";
+import {
+  getActiveMenuContext,
+  getMenuContextExpiredPrompt,
+  rememberMenuContext,
+  resolveMenuModeFromContext
+} from "@/lib/commands/menu-context";
+import {
+  clearPendingAction,
+  createPendingAction,
+  getPendingActionState
+} from "@/lib/commands/pending";
+import { getMvpText, getSettlementSummaryText } from "@/lib/commands/settlement";
 import { formatCents, parseAmountToCents } from "@/lib/currency";
 import { db } from "@/lib/db";
 import {
   createExpenseInGroup,
+  getActiveLedgerExpenseMvp,
   getConfirmedMemberIdsForActiveLedger,
   getMembersMissingPaymentMethod,
   getOrCreateGroupContext,
@@ -33,13 +47,17 @@ import {
 } from "@/lib/group-service";
 import {
   addMembersToCollectingLedger,
+  archiveLedger,
+  closeActiveLedger,
   confirmCollectingLedger,
   createLedgerForGroup,
   getActiveLedger,
   getActiveLedgerParticipants,
   joinCollectingLedger,
   leaveCollectingLedger,
-  removeMemberFromCollectingLedger
+  listLedgers,
+  removeMemberFromCollectingLedger,
+  switchActiveLedger
 } from "@/lib/ledger-service";
 import {
   defaultPaymentSetupDraft,
@@ -53,10 +71,12 @@ import {
 import { parseLineCommand } from "@/lib/line/parser";
 import { getLineDisplayName } from "@/lib/line/profile";
 import type { LineTextReplyPayload } from "@/lib/line/client";
-import type { LineEvent, LineJoinLikeEvent, LineMessageEvent } from "@/lib/line/types";
-
-const deleteExpenseState = new Map<string, number>();
-const DELETE_EXPENSE_TTL_MS = 5 * 60 * 1000;
+import type {
+  LineEvent,
+  LineJoinLikeEvent,
+  LineMessageEvent,
+  ParsedLineCommand
+} from "@/lib/line/types";
 
 type ChatContext = {
   chatId: string;
@@ -106,6 +126,10 @@ function normalizeName(value: string) {
   return value.trim().replace(/\s+/gu, "").toLowerCase();
 }
 
+function normalizeLedgerName(value: string) {
+  return value.trim().replace(/\s+/gu, " ").toLowerCase();
+}
+
 function isUrlLikeText(text: string) {
   return /https?:\/\//iu.test(text);
 }
@@ -144,34 +168,6 @@ function buildSettlementLines(snapshot: Awaited<ReturnType<typeof getSettlementS
   );
 }
 
-function deleteStateKey(chatId: string, lineUserId?: string) {
-  return `${chatId}:${lineUserId ?? "unknown"}`;
-}
-
-function setDeleteExpenseState(chatId: string, lineUserId?: string) {
-  deleteExpenseState.set(deleteStateKey(chatId, lineUserId), Date.now() + DELETE_EXPENSE_TTL_MS);
-}
-
-function clearDeleteExpenseState(chatId: string, lineUserId?: string) {
-  deleteExpenseState.delete(deleteStateKey(chatId, lineUserId));
-}
-
-function hasDeleteExpenseState(chatId: string, lineUserId?: string) {
-  const key = deleteStateKey(chatId, lineUserId);
-  const expiresAt = deleteExpenseState.get(key);
-
-  if (!expiresAt) {
-    return false;
-  }
-
-  if (expiresAt < Date.now()) {
-    deleteExpenseState.delete(key);
-    return false;
-  }
-
-  return true;
-}
-
 async function resolveActorDisplayName(event: LineMessageEvent) {
   const displayName = await getLineDisplayName(event.source);
   return displayName?.trim() || "使用者";
@@ -193,12 +189,124 @@ async function getGroupIdOrReply(event: LineMessageEvent) {
   };
 }
 
-async function handleCreateLedger(event: LineMessageEvent, name: string) {
-  const { lineUserId } = getChatContext(event.source);
+async function showMenu(event: LineMessageEvent, mode: "xiaoer" | "settlement") {
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
+  const binding = chatType === "user" ? null : await getOrCreateGroupContext(event.source);
+
+  await rememberMenuContext({
+    chatId,
+    lineUserId,
+    groupId: binding?.group.id ?? null,
+    mode
+  });
+
+  return mode === "xiaoer" ? getXiaoerMenuText() : getSettlementMenuText();
+}
+
+async function resolveShortcutCommand(
+  event: LineMessageEvent,
+  number: number,
+  payload?: string
+): Promise<ParsedLineCommand> {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const context = await getActiveMenuContext(chatId, lineUserId);
+  const menuMode = resolveMenuModeFromContext(context);
+  const trimmedPayload = payload?.trim();
+
+  if (!menuMode) {
+    return { kind: "menu-context-required" };
+  }
+
+  if (menuMode === "xiaoer") {
+    if (number === 1) {
+      return trimmedPayload
+        ? { kind: "create-ledger", name: trimmedPayload }
+        : { kind: "create-ledger-help" };
+    }
+
+    if (number === 2) {
+      return { kind: "member-management-help" };
+    }
+
+    if (number === 3) {
+      return { kind: "confirm-members" };
+    }
+
+    if (number === 4) {
+      return { kind: "start-payment-setup" };
+    }
+
+    if (number === 5) {
+      return { kind: "expense-help" };
+    }
+
+    if (number === 6) {
+      return { kind: "recent-expenses" };
+    }
+
+    if (number === 7) {
+      return { kind: "delete-last-expense" };
+    }
+  }
+
+  if (menuMode === "settlement") {
+    if (number === 1) {
+      return { kind: "current-settlement" };
+    }
+
+    if (number === 2) {
+      return { kind: "ledger-settlement" };
+    }
+
+    if (number === 3) {
+      return { kind: "mvp" };
+    }
+
+    if (number === 4) {
+      return { kind: "archive-ledger" };
+    }
+  }
+
+  return { kind: "ignored" };
+}
+
+async function handleCreateLedgerPrompt(event: LineMessageEvent) {
+  const { chatId, lineUserId } = getChatContext(event.source);
   const group = await getGroupIdOrReply(event);
 
   if (!group.ok) {
     return group.reply;
+  }
+
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  await createPendingAction({
+    groupId: group.groupId,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.awaiting_activity_name,
+    ttlMinutes: 3
+  });
+
+  return "請直接輸入活動名稱";
+}
+
+async function handleCreateLedger(event: LineMessageEvent, name: string) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  if (lineUserId) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: PendingActionType.awaiting_activity_name
+    });
   }
 
   const actorDisplayName = await resolveActorDisplayName(event);
@@ -412,6 +520,244 @@ async function handleConfirmMembers(event: LineMessageEvent) {
     ...paymentLines,
     "",
     "現在可以開始記帳。"
+  ].join("\n");
+}
+
+function canManageLedger(
+  ledger: { creatorLineUserId: string | null },
+  lineUserId?: string
+) {
+  return !ledger.creatorLineUserId || ledger.creatorLineUserId === lineUserId;
+}
+
+function getLedgerStatusText(ledger: {
+  status: "active" | "closed" | "archived";
+  isActive: boolean;
+  isCollectingMembers: boolean;
+}) {
+  if (ledger.status === "archived") {
+    return "已封存";
+  }
+
+  if (ledger.isActive) {
+    return ledger.isCollectingMembers ? "收集成員中" : "進行中";
+  }
+
+  return "已結束";
+}
+
+async function handleCurrentLedger(event: LineMessageEvent) {
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const active = await getActiveLedgerParticipants(group.groupId);
+
+  if (!active.ledger) {
+    return [
+      "目前沒有進行中的活動。",
+      "可輸入「查看帳本」查看歷史帳本，或輸入「建立活動 活動名稱」。"
+    ].join("\n");
+  }
+
+  return [
+    `目前活動：${active.ledger.name}`,
+    `狀態：${getLedgerStatusText(active.ledger)}`,
+    `成員：${formatMemberList(formatParticipantNames(active.participants))}`,
+    `支出：${active.ledger.expenseCount} 筆`
+  ].join("\n");
+}
+
+async function handleListLedgers(event: LineMessageEvent) {
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const ledgers = await listLedgers(group.groupId);
+
+  if (ledgers.length === 0) {
+    return "目前尚未建立任何活動。\n請輸入：建立活動 活動名稱";
+  }
+
+  return [
+    "帳本列表：",
+    "",
+    ...ledgers.map(
+      (ledger, index) =>
+        `${index + 1}. ${ledger.name}｜${getLedgerStatusText(ledger)}｜${ledger.expenseCount} 筆支出`
+    ),
+    "",
+    "可輸入：切換活動 活動名稱",
+    "封存帳本會保留資料，但無法從 LINE 恢復。"
+  ].join("\n");
+}
+
+async function handleSwitchLedger(event: LineMessageEvent, name: string) {
+  const { lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const ledgers = await listLedgers(group.groupId);
+  const target = ledgers.find(
+    (ledger) => normalizeLedgerName(ledger.name) === normalizeLedgerName(name)
+  );
+
+  if (!target) {
+    return `找不到活動：${name}\n請輸入「查看帳本」確認活動名稱。`;
+  }
+
+  if (target.status === "archived") {
+    return "這個帳本已封存，無法從 LINE 切換回來。";
+  }
+
+  if (target.isActive) {
+    return `目前已在活動：${target.name}`;
+  }
+
+  const activeLedger = await getActiveLedger(group.groupId);
+
+  if (
+    (activeLedger && !canManageLedger(activeLedger, lineUserId)) ||
+    !canManageLedger(target, lineUserId)
+  ) {
+    return "只有活動建立者可以切換帳本。";
+  }
+
+  const result = await switchActiveLedger(group.groupId, target.name);
+  const reply = [`已切換活動：${result.ledger.name}`];
+
+  if (result.previousActiveName) {
+    reply.push(`原活動已結束：${result.previousActiveName}`);
+  }
+
+  return reply.join("\n");
+}
+
+async function handleCloseLedger(event: LineMessageEvent) {
+  const { lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const activeLedger = await getActiveLedger(group.groupId);
+
+  if (!activeLedger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (!canManageLedger(activeLedger, lineUserId)) {
+    return "只有活動建立者可以結束活動。";
+  }
+
+  const closed = await closeActiveLedger(group.groupId);
+
+  return [
+    `已結束活動：${closed?.name ?? activeLedger.name}`,
+    "帳本與支出資料都已保留，可用「切換活動 活動名稱」再次開啟。"
+  ].join("\n");
+}
+
+async function handleArchiveLedgerPrompt(event: LineMessageEvent, name?: string) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  const ledgers = await listLedgers(group.groupId);
+  const target = name
+    ? ledgers.find(
+        (ledger) => normalizeLedgerName(ledger.name) === normalizeLedgerName(name)
+      )
+    : ledgers.find((ledger) => ledger.isActive);
+
+  if (!target) {
+    return name
+      ? `找不到活動：${name}\n請輸入「查看帳本」確認活動名稱。`
+      : "目前沒有進行中的活動。若要封存歷史帳本，請輸入：封存帳本 活動名稱";
+  }
+
+  if (target.status === "archived") {
+    return `帳本「${target.name}」已經封存。`;
+  }
+
+  if (!canManageLedger(target, lineUserId)) {
+    return "只有活動建立者可以封存帳本。";
+  }
+
+  await createPendingAction({
+    groupId: group.groupId,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.archive_active_ledger,
+    targetLedgerId: target.id
+  });
+
+  return [
+    `準備封存帳本：${target.name}`,
+    `支出紀錄：${target.expenseCount} 筆`,
+    "",
+    "封存後資料仍會保留，但無法從 LINE 切換回來。",
+    "確定請輸入「確認」，放棄請輸入「取消」。"
+  ].join("\n");
+}
+
+async function handleArchiveLedgerConfirmation(
+  event: LineMessageEvent,
+  targetLedgerId: string
+) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const ledger = await db.ledger.findFirst({
+    where: {
+      id: targetLedgerId,
+      groupId: group.groupId
+    }
+  });
+
+  if (!ledger) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: PendingActionType.archive_active_ledger
+    });
+    return "找不到要封存的帳本，請重新輸入「封存帳本」。";
+  }
+
+  if (!canManageLedger(ledger, lineUserId)) {
+    return "只有活動建立者可以封存帳本。";
+  }
+
+  const archived = await archiveLedger(group.groupId, ledger.name);
+  await clearPendingAction({
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.archive_active_ledger
+  });
+
+  return [
+    `已封存帳本：${archived.name}`,
+    `共保留 ${archived.expenseCount} 筆支出紀錄。`,
+    "可輸入「查看帳本」查看所有帳本。"
   ].join("\n");
 }
 
@@ -835,7 +1181,17 @@ async function handleDeleteExpensePrompt(event: LineMessageEvent) {
     return "目前沒有可刪除的支出。";
   }
 
-  setDeleteExpenseState(chatId, lineUserId);
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  await createPendingAction({
+    groupId: group.groupId,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.delete_recent_expense,
+    targetLedgerId: recent.activeLedger.id
+  });
   const expenses = [...recent.expenses].reverse();
 
   return [
@@ -847,7 +1203,11 @@ async function handleDeleteExpensePrompt(event: LineMessageEvent) {
   ].join("\n");
 }
 
-async function handleDeleteExpenseByName(event: LineMessageEvent, text: string) {
+async function handleDeleteExpenseByName(
+  event: LineMessageEvent,
+  text: string,
+  targetLedgerId: string
+) {
   const { chatId, lineUserId } = getChatContext(event.source);
   const group = await getGroupIdOrReply(event);
 
@@ -856,8 +1216,17 @@ async function handleDeleteExpenseByName(event: LineMessageEvent, text: string) 
   }
 
   const target = normalizeName(text);
-  const recent = await getRecentExpenses(group.groupId, 50);
-  const expense = recent.expenses.find((item) => {
+  const expenses = await db.expense.findMany({
+    where: {
+      groupId: group.groupId,
+      ledgerId: targetLedgerId
+    },
+    orderBy: {
+      createdAt: "desc"
+    },
+    take: 50
+  });
+  const expense = expenses.find((item) => {
     const label = `${item.title}${formatAmountForDisplay(item.amountCents)}`;
     return normalizeName(label) === target || normalizeName(item.title) === target;
   });
@@ -871,7 +1240,11 @@ async function handleDeleteExpenseByName(event: LineMessageEvent, text: string) 
       id: expense.id
     }
   });
-  clearDeleteExpenseState(chatId, lineUserId);
+  await clearPendingAction({
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.delete_recent_expense
+  });
 
   const snapshot = await getSettlementSnapshot(group.groupId);
 
@@ -896,6 +1269,51 @@ async function handleSettlement(event: LineMessageEvent) {
   }
 
   return buildSettlementText(buildSettlementLines(snapshot));
+}
+
+async function handleLedgerSettlement(event: LineMessageEvent) {
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const snapshot = await getSettlementSnapshot(group.groupId);
+
+  if (!snapshot?.activeLedger) {
+    return getNoActiveLedgerText();
+  }
+
+  return getSettlementSummaryText({
+    activityName: snapshot.activeLedger.name,
+    totalExpenseDisplay: snapshot.summary.totalExpenseDisplay,
+    transfers: snapshot.summary.settlement
+  });
+}
+
+async function handleMvp(event: LineMessageEvent) {
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const snapshot = await getActiveLedgerExpenseMvp(group.groupId);
+
+  if (!snapshot?.activeLedger) {
+    return getNoActiveLedgerText();
+  }
+
+  if (!snapshot.winner) {
+    return `目前活動：${snapshot.activeLedger.name}\n目前還沒有支出資料，無法選出代墊 MVP。`;
+  }
+
+  return getMvpText({
+    activityName: snapshot.activeLedger.name,
+    memberName: snapshot.winner.memberName,
+    advanceCount: snapshot.winner.advanceCount,
+    totalPaidCents: snapshot.winner.totalPaidCents
+  });
 }
 
 async function continuePaymentSetup(lineUserId: string, draft: PaymentSetupDraft) {
@@ -1057,9 +1475,35 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
       return paymentReply;
     }
 
-    const parsed = parseLineCommand(rawText);
+    let parsed = parseLineCommand(rawText);
+
+    if (parsed.kind === "xiaoer-help") {
+      return showMenu(event, "xiaoer");
+    }
+
+    if (parsed.kind === "settlement-help") {
+      return showMenu(event, "settlement");
+    }
+
+    if (parsed.kind === "shortcut") {
+      parsed = await resolveShortcutCommand(event, parsed.number, parsed.payload);
+    }
+
     if (parsed.kind === "start-payment-setup") {
       return startPaymentSetup(lineUserId);
+    }
+
+    if (parsed.kind === "view-payment-settings") {
+      const profile = await getOrCreateLineUserProfile(lineUserId);
+      return formatPaymentSummary(profile);
+    }
+
+    if (parsed.kind === "menu-context-required") {
+      return getMenuContextExpiredPrompt();
+    }
+
+    if (parsed.kind !== "ignored") {
+      return "這個功能請在 LINE 群組中使用。";
     }
 
     return null;
@@ -1069,26 +1513,159 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
     return null;
   }
 
-  if (hasDeleteExpenseState(chatId, lineUserId)) {
+  const deletePendingState = lineUserId
+    ? await getPendingActionState({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.delete_recent_expense
+      })
+    : null;
+
+  if (deletePendingState?.pending) {
     if (rawText === "取消") {
-      clearDeleteExpenseState(chatId, lineUserId);
+      await clearPendingAction({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.delete_recent_expense
+      });
       return "已取消刪除支出。";
     }
 
-    return handleDeleteExpenseByName(event, rawText);
+    if (!deletePendingState.pending.targetLedgerId) {
+      await clearPendingAction({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.delete_recent_expense
+      });
+      return "刪除操作已失效，請重新輸入「刪除支出」。";
+    }
+
+    return handleDeleteExpenseByName(
+      event,
+      rawText,
+      deletePendingState.pending.targetLedgerId
+    );
   }
 
-  const parsed = parseLineCommand(rawText);
+  const archivePendingState = lineUserId
+    ? await getPendingActionState({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.archive_active_ledger
+      })
+    : null;
+
+  if (archivePendingState?.pending) {
+    if (rawText === "取消") {
+      await clearPendingAction({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.archive_active_ledger
+      });
+      return "已取消封存帳本。";
+    }
+
+    if (rawText !== "確認") {
+      return "若要封存請輸入「確認」，放棄請輸入「取消」。";
+    }
+
+    if (!archivePendingState.pending.targetLedgerId) {
+      await clearPendingAction({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.archive_active_ledger
+      });
+      return "封存操作已失效，請重新輸入「封存帳本」。";
+    }
+
+    return handleArchiveLedgerConfirmation(
+      event,
+      archivePendingState.pending.targetLedgerId
+    );
+  }
+
+  let parsed = parseLineCommand(rawText);
+
+  const activityNamePendingState = lineUserId
+    ? await getPendingActionState({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.awaiting_activity_name
+      })
+    : null;
+
+  if (activityNamePendingState?.pending) {
+    if (parsed.kind === "cancel") {
+      await clearPendingAction({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.awaiting_activity_name
+      });
+      return "已取消建立活動。";
+    }
+
+    if (parsed.kind === "xiaoer-help" || parsed.kind === "settlement-help") {
+      await clearPendingAction({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.awaiting_activity_name
+      });
+    } else if (parsed.kind === "ignored") {
+      return handleCreateLedger(event, rawText);
+    }
+  }
+
+  if (parsed.kind === "shortcut") {
+    parsed = await resolveShortcutCommand(event, parsed.number, parsed.payload);
+  }
 
   switch (parsed.kind) {
-    case "xiaoer-help":
-      return getXiaoerMenuText();
+    case "menu-context-required":
+      return getMenuContextExpiredPrompt();
 
-    case "settlement":
+    case "xiaoer-help":
+      return showMenu(event, "xiaoer");
+
+    case "settlement-help":
+      return showMenu(event, "settlement");
+
+    case "current-settlement":
       return handleSettlement(event);
 
+    case "ledger-settlement":
+      return handleLedgerSettlement(event);
+
+    case "mvp":
+      return handleMvp(event);
+
+    case "member-management-help":
+      return [
+        "加入活動請輸入：+",
+        "退出活動請輸入：-",
+        "手動新增成員：新增成員 小明 小華",
+        "手動刪除成員：刪除成員 小明"
+      ].join("\n");
+
+    case "current-ledger":
+      return handleCurrentLedger(event);
+
+    case "list-ledgers":
+      return handleListLedgers(event);
+
+    case "switch-ledger-help":
+      return "請輸入：切換活動 活動名稱\n可先輸入「查看帳本」確認名稱。";
+
+    case "switch-ledger":
+      return handleSwitchLedger(event, parsed.name);
+
+    case "close-ledger":
+      return handleCloseLedger(event);
+
+    case "archive-ledger":
+      return handleArchiveLedgerPrompt(event, parsed.name);
+
     case "create-ledger-help":
-      return "請輸入：建立活動 活動名稱";
+      return handleCreateLedgerPrompt(event);
 
     case "create-ledger":
       return parsed.name ? handleCreateLedger(event, parsed.name) : "請輸入：建立活動 活動名稱";
@@ -1112,7 +1689,9 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
       return getPaymentSetupGuideText();
 
     case "expense-help": {
-      const inlineExpense = rawText.replace(/^新增支出\s*/u, "").trim();
+      const inlineExpense = rawText.startsWith("新增支出")
+        ? rawText.replace(/^新增支出\s*/u, "").trim()
+        : "";
 
       if (inlineExpense) {
         return handleExpenseInput(event, inlineExpense);
@@ -1155,7 +1734,9 @@ async function handleJoinLikeEvent(event: LineJoinLikeEvent) {
       `群組 ID：${lineGroupId ?? "未知"}`,
       "",
       "例如輸入：",
-      "建立活動 宜蘭三天兩夜"
+      "建立活動 宜蘭三天兩夜",
+      "",
+      "輸入「小二」或「算帳」可查看功能。"
     ].join("\n");
   }
 

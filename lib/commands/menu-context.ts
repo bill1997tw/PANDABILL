@@ -1,7 +1,7 @@
 import { MenuContextType } from "@prisma/client";
 
-import { db } from "@/lib/db";
 import type { MenuMode } from "@/lib/commands/help";
+import { db } from "@/lib/db";
 
 const MENU_CONTEXT_TTL_MINUTES = 5;
 
@@ -71,7 +71,7 @@ export async function getActiveMenuContext(chatId: string, lineUserId?: string) 
 
 export function resolveMenuModeFromContext(
   context: Awaited<ReturnType<typeof getActiveMenuContext>>
-): MenuMode | null {
+) {
   if (!context) {
     return null;
   }
@@ -80,5 +80,5 @@ export function resolveMenuModeFromContext(
 }
 
 export function getMenuContextExpiredPrompt() {
-  return "請先輸入「小二」或「算帳」，小二才知道大人現在要用哪一套選單。";
+  return "請先輸入「小二」或「算帳」，小二才知道大人要使用哪一套功能。";
 }

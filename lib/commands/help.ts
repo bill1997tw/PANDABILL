@@ -2,7 +2,7 @@ export type MenuMode = "xiaoer" | "settlement";
 
 export function getXiaoerMenuText() {
   return [
-    "小的來哩～請大人儘管吩咐～",
+    "小二來哩～請大人儘管吩咐~我會...",
     "",
     "1. 建立活動：請直接輸入活動名稱",
     "2. 加入 + ／退出活動 - 或手動新增/刪除成員",
@@ -10,14 +10,20 @@ export function getXiaoerMenuText() {
     "4. 設定收款方式：私訊小二設定",
     "5. 新增支出",
     "6. 查看目前支出",
-    "7. 刪除支出"
+    "7. 刪除支出",
+    "",
+    "或是大人需要【算帳】也沒有問題~"
   ].join("\n");
 }
 
 export function getSettlementMenuText() {
   return [
-    "目前結算可直接輸入【算帳】查看。",
-    "若要新增支出，請輸入【新增支出】查看語法。"
+    "大人您要結帳了嗎?~小二聽您差遣~您需要...",
+    "",
+    "1. 查看目前結算",
+    "2. 帳本結算",
+    "3. 代墊 MVP",
+    "4. 結束活動並封存帳本"
   ].join("\n");
 }
 

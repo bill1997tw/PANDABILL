@@ -71,14 +71,25 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
 
       setData(groupData);
       setSettlement(settlementData);
+      setExpenseForm((current) => {
+        const activeMemberIds = new Set(
+          groupData.activeMembers.map((member) => member.id)
+        );
+        const validParticipantIds = current.participantIds.filter((id) =>
+          activeMemberIds.has(id)
+        );
 
-      if (!expenseForm.payerId && groupData.members[0]) {
-        setExpenseForm((current) => ({
+        return {
           ...current,
-          payerId: groupData.members[0].id,
-          participantIds: groupData.members.map((member) => member.id)
-        }));
-      }
+          payerId: activeMemberIds.has(current.payerId)
+            ? current.payerId
+            : groupData.activeMembers[0]?.id ?? "",
+          participantIds:
+            validParticipantIds.length > 0
+              ? validParticipantIds
+              : groupData.activeMembers.map((member) => member.id)
+        };
+      });
     } catch (fetchError) {
       setError(
         fetchError instanceof Error ? fetchError.message : "讀取群組資料失敗。"
@@ -94,11 +105,13 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
   }, [groupId]);
 
   const members = data?.members ?? [];
+  const activeMembers = data?.activeMembers ?? [];
   const expenses = data?.expenses ?? [];
-  const canCreateExpense = members.length > 0;
   const totalExpenseDisplay = settlement?.totalExpenseDisplay ?? "0.00";
   const activeLedger = data?.activeLedger ?? null;
   const ledgers = data?.ledgers ?? [];
+  const canCreateExpense =
+    Boolean(activeLedger) && !activeLedger?.isCollectingMembers && activeMembers.length > 0;
 
   const selectedParticipants = useMemo(
     () => new Set(expenseForm.participantIds),
@@ -154,8 +167,8 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
       setExpenseForm({
         title: "",
         amount: "",
-        payerId: members[0]?.id ?? "",
-        participantIds: members.map((member) => member.id),
+        payerId: activeMembers[0]?.id ?? "",
+        participantIds: activeMembers.map((member) => member.id),
         notes: ""
       });
       setNotice("支出新增成功。");
@@ -254,7 +267,7 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
 
           <SectionCard
             title="2. 成員列表"
-            description="群組內負責分帳的人名單。付款方式請每位成員自行私聊 Bot 輸入「10」或「設定收款」設定，之後新群組也會沿用。"
+            description="群組內負責分帳的人名單。活動收集成員期間新增的人，也會同步加入本期活動。付款方式請每位成員自行私聊 Bot 設定。"
           >
             <form className="flex flex-col gap-3 sm:flex-row" onSubmit={handleAddMember}>
               <input
@@ -300,7 +313,7 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
 
           <SectionCard
             title="活動帳本"
-            description="同一個群組可以有很多本帳，但同時間只會有一本是目前進行中。LINE 群組裡可用「建立活動」、「切換活動」、「結束活動」、「封存帳本」。"
+            description="同一個群組可以有很多本帳，但同時間只會有一本進行中。LINE 群組輸入「小二」查看活動與記帳，輸入「算帳」查看結算與封存。"
           >
             {ledgers.length === 0 ? (
               <EmptyState
@@ -325,18 +338,27 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
             title="3. 新增支出表單"
             description="預設平均分攤，系統會自動處理小數與尾差，最後統一顯示到小數點後兩位。"
           >
-            {!canCreateExpense ? (
+            {!activeLedger ? (
               <EmptyState
-                title="還不能新增支出"
-                description="請先建立至少一位成員，才能開始記帳。"
+                title="目前沒有進行中的帳本"
+                description="請先在 LINE 群組輸入：建立活動 活動名稱。建立後，這裡的新支出才會記到正確帳本。"
+              />
+            ) : activeLedger.isCollectingMembers ? (
+              <EmptyState
+                title="活動成員尚未確認"
+                description="請先在 LINE 群組加入或新增成員，再由活動建立者輸入「確認成員」。"
+              />
+            ) : !canCreateExpense ? (
+              <EmptyState
+                title="本期活動沒有可記帳成員"
+                description="目前活動沒有有效成員，請建立新活動並重新確認成員。"
               />
             ) : (
-              activeLedger ? (
-                <form
-                  id="expense-form"
-                  className="scroll-mt-24 space-y-4"
-                  onSubmit={handleAddExpense}
-                >
+              <form
+                id="expense-form"
+                className="scroll-mt-24 space-y-4"
+                onSubmit={handleAddExpense}
+              >
                   <div className="rounded-2xl bg-mist px-4 py-3 text-sm text-slate-600">
                     目前會記到帳本：<span className="font-semibold text-ink">{activeLedger.name}</span>
                   </div>
@@ -390,7 +412,7 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
                         }
                       >
                         <option value="">請選擇付款人</option>
-                        {members.map((member) => (
+                        {activeMembers.map((member) => (
                           <option key={member.id} value={member.id}>
                             {member.name}
                           </option>
@@ -422,7 +444,7 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
                       <span className="text-xs text-slate-500">至少勾選 1 人</span>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2">
-                      {members.map((member) => (
+                      {activeMembers.map((member) => (
                         <label
                           key={member.id}
                           className="flex items-center gap-3 rounded-2xl border border-line bg-mist px-4 py-3"
@@ -446,13 +468,7 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
                   >
                     {expenseSubmitting ? "送出中..." : "5. 送出支出"}
                   </button>
-                </form>
-              ) : (
-                <EmptyState
-                  title="目前沒有進行中的帳本"
-                  description="請先在 LINE 群組輸入：建立活動 活動名稱。建立後，這裡的新支出才會記到正確帳本。"
-                />
-              )
+              </form>
             )}
           </SectionCard>
 
@@ -574,10 +590,7 @@ export function GroupDetailPage({ groupId }: GroupDetailPageProps) {
                 </p>
               </div>
               <p>
-                在 LINE 群組可直接輸入：
-                <span className="font-semibold text-ink"> 2{data?.group.lineJoinCode ?? "綁定碼"}</span>
-                或
-                <span className="font-semibold text-ink"> 綁定群組 {data?.group.lineJoinCode ?? "綁定碼"}</span>
+                LINE Bot 加入群組後會自動建立對應群組，目前不需要手動輸入綁定碼。
               </p>
               <p>
                 每位成員請私聊 Bot：

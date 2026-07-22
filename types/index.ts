@@ -101,6 +101,7 @@ export type GroupDetailDto = {
   activeLedger: LedgerDto | null;
   ledgers: LedgerDto[];
   members: MemberDto[];
+  activeMembers: MemberDto[];
   expenses: ExpenseDto[];
   summary: {
     totalExpenseCents: number;

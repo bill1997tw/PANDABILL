@@ -415,6 +415,14 @@ export async function getGroupDetail(groupId: string) {
   const paymentProfileMap = await getGroupMemberPaymentMap(
     group.members.map((member) => member.name)
   );
+  const serializeMember = (member: (typeof group.members)[number]) => ({
+    id: member.id,
+    name: member.name,
+    lineUserId: member.lineUserId,
+    paymentSettingsToken: null,
+    createdAt: member.createdAt.toISOString(),
+    paymentProfile: paymentProfileMap.get(member.name) ?? null
+  });
 
   return {
     group: {
@@ -429,14 +437,10 @@ export async function getGroupDetail(groupId: string) {
     },
     activeLedger: activeLedger ? serializeLedger(activeLedger) : null,
     ledgers: ledgers.map(serializeLedger),
-    members: group.members.map((member) => ({
-      id: member.id,
-      name: member.name,
-      lineUserId: member.lineUserId,
-      paymentSettingsToken: null,
-      createdAt: member.createdAt.toISOString(),
-      paymentProfile: paymentProfileMap.get(member.name) ?? null
-    })),
+    members: group.members.map(serializeMember),
+    activeMembers: activeParticipants.participants.map((participant) =>
+      serializeMember(participant.member)
+    ),
     expenses: activeLedgerExpenses.map(serializeExpense),
     summary: {
       ...summary,

@@ -29,47 +29,32 @@ export type LineWebhookBody = {
   events: LineEvent[];
 };
 
-export type ParsedExpenseCommand = {
-  kind: "expense";
-  title: string;
-  amount: string;
-  payerName?: string;
-  payerIsSender?: boolean;
-  participantCount?: number;
-};
-
 export type ParsedLineCommand =
   | { kind: "ignored" }
   | { kind: "menu-context-required" }
+  | { kind: "shortcut"; number: number; payload?: string }
   | { kind: "xiaoer-help" }
   | { kind: "settlement-help" }
+  | { kind: "current-settlement" }
+  | { kind: "ledger-settlement" }
+  | { kind: "mvp" }
+  | { kind: "member-management-help" }
+  | { kind: "current-ledger" }
+  | { kind: "list-ledgers" }
+  | { kind: "switch-ledger-help" }
+  | { kind: "switch-ledger"; name: string }
+  | { kind: "close-ledger" }
+  | { kind: "archive-ledger"; name?: string }
   | { kind: "create-ledger-help" }
-  | { kind: "shortcut"; number: number; payload?: string }
+  | { kind: "create-ledger"; name: string }
   | { kind: "join-activity" }
   | { kind: "leave-activity" }
   | { kind: "add-members"; names: string[] }
   | { kind: "remove-member"; name: string }
   | { kind: "confirm-members" }
-  | { kind: "list-members" }
-  | { kind: "confirm" }
   | { kind: "cancel" }
-  | { kind: "create-ledger"; name: string }
-  | { kind: "switch-ledger"; name: string }
-  | { kind: "current-ledger" }
-  | { kind: "current-settlement" }
-  | { kind: "reset-ledger" }
-  | { kind: "group-info" }
-  | { kind: "list-ledgers" }
-  | { kind: "close-ledger" }
-  | { kind: "archive-ledger"; name: string }
-  | { kind: "list-archived-ledgers" }
   | { kind: "delete-last-expense" }
-  | { kind: "settlement" }
-  | { kind: "mvp" }
   | { kind: "recent-expenses" }
-  | { kind: "expense-help"; useLegacyAlias?: boolean }
-  | { kind: "create-group"; name: string }
-  | { kind: "bind"; target: string }
-  | { kind: "identify-self"; name: string }
+  | { kind: "expense-help" }
   | { kind: "start-payment-setup" }
-  | ParsedExpenseCommand;
+  | { kind: "view-payment-settings" };
