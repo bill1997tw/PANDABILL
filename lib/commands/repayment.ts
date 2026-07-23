@@ -14,9 +14,13 @@ function compact(text: string) {
 
 export function parseRepaymentInput(text: string): ParsedRepayment | RepaymentParseError {
   const normalized = compact(text);
-  const match = normalized.match(
-    /^還款\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?<payer>我|[^\d\s]+?)\s*(?:付給|給|付)\s*(?<receiver>[^\d\s]+)\s*$/u
-  );
+  const match =
+    normalized.match(
+      /^(?<payer>我|[^\d\s]+?)\s*還款\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?:付給|給|付)\s*(?<receiver>[^\d\s]+)\s*$/u
+    ) ??
+    normalized.match(
+      /^還款\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?<payer>我|[^\d\s]+?)\s*(?:付給|給|付)\s*(?<receiver>[^\d\s]+)\s*$/u
+    );
 
   if (!match?.groups) {
     return {
@@ -34,9 +38,9 @@ export function parseRepaymentInput(text: string): ParsedRepayment | RepaymentPa
 export function getRepaymentGuideText() {
   return [
     "中途還款請輸入：",
-    "還款13740周永濠給翔翔",
+    "小明還款14000給小華",
     "",
     "也可使用「我」：",
-    "還款13740我給翔翔"
+    "我還款14000給小華"
   ].join("\n");
 }

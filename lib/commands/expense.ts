@@ -8,6 +8,7 @@ export type ParsedExpenseBlock = {
   amount: string;
   payerName: string;
   payerIsSender: boolean;
+  isBorrowing: boolean;
   participantNames: string[] | null;
   shares: Array<{
     name: string;
@@ -54,6 +55,12 @@ function parseSeparatedPayerBeforeAmount(block: string) {
   );
 }
 
+function parseBorrowing(block: string) {
+  return block.match(
+    /^(?<borrower>我|[^\d\s]+?)\s*(?:跟|向)\s*(?<payer>我|[^\d\s]+?)\s*借(?:款)?\s*(?<amount>\d+(?:\.\d{1,2})?)\s*(?:元)?$/u
+  );
+}
+
 function parseShares(tail: string) {
   const shares: ParsedExpenseBlock["shares"] = [];
   const regex = /(\d+(?:\.\d{1,2})?)\s*([^\d\s\/／]+)/gu;
@@ -70,7 +77,7 @@ function parseShares(tail: string) {
 }
 
 function parseParticipantNames(tail: string) {
-  const normalized = compact(tail).replace(/分$/u, "").trim();
+  const normalized = compact(tail).replace(/(?:分|借款)$/u, "").trim();
 
   if (!normalized) {
     return null;
@@ -100,6 +107,23 @@ export function parseExpenseBlock(block: string): ParsedExpenseBlock | ExpensePa
     };
   }
 
+  const borrowing = parseBorrowing(normalized);
+
+  if (borrowing?.groups) {
+    const borrowerName = compact(borrowing.groups.borrower ?? "");
+    const payerName = compact(borrowing.groups.payer ?? "");
+
+    return {
+      title: "借款",
+      amount: borrowing.groups.amount ?? "",
+      payerName,
+      payerIsSender: payerName === "我",
+      isBorrowing: true,
+      participantNames: [borrowerName],
+      shares: []
+    };
+  }
+
   if (!normalized.includes("付")) {
     return {
       block,
@@ -124,6 +148,7 @@ export function parseExpenseBlock(block: string): ParsedExpenseBlock | ExpensePa
   const amount = match.groups.amount ?? "";
   const payerName = compact(match.groups.payer ?? "");
   const tail = compact(match.groups.tail ?? "");
+  const isBorrowing = /借款$/u.test(tail);
 
   if (!title) {
     return {
@@ -154,6 +179,7 @@ export function parseExpenseBlock(block: string): ParsedExpenseBlock | ExpensePa
       amount,
       payerName,
       payerIsSender: payerName === "我",
+      isBorrowing,
       participantNames: null,
       shares
     };
@@ -164,6 +190,7 @@ export function parseExpenseBlock(block: string): ParsedExpenseBlock | ExpensePa
     amount,
     payerName,
     payerIsSender: payerName === "我",
+    isBorrowing,
     participantNames: parseParticipantNames(tail),
     shares: []
   };
@@ -176,5 +203,8 @@ export function looksLikeExpenseInput(text: string) {
     return false;
   }
 
-  return normalized.includes("付") && /\d/u.test(normalized);
+  return (
+    (normalized.includes("付") && /\d/u.test(normalized)) ||
+    parseBorrowing(normalized) !== null
+  );
 }

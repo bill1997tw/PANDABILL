@@ -36,7 +36,10 @@ export function parseLineCommand(text: string): ParsedLineCommand {
     return { kind: "repayment-help" };
   }
 
-  if (normalized.startsWith("還款")) {
+  if (
+    normalized.startsWith("還款") ||
+    /^(?:我|[^\d\s]+?)\s*還款\s*\d/u.test(normalized)
+  ) {
     return { kind: "repayment", text: normalized };
   }
 

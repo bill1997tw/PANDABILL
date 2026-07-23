@@ -994,7 +994,7 @@ async function createParsedExpense(input: {
       .filter((participant) => !byMemberId.has(participant.memberId))
       .map((participant) => participant.displayName);
   } else if (input.parsed.participantNames && input.parsed.participantNames.length > 0) {
-    const members: ParticipantRef[] = [resolved.payer];
+    const members: ParticipantRef[] = input.parsed.isBorrowing ? [] : [resolved.payer];
 
     for (const name of input.parsed.participantNames) {
       const member = resolveMemberByName(resolved.active.participants, name, {
@@ -1031,7 +1031,8 @@ async function createParsedExpense(input: {
     amount: input.parsed.amount,
     payerId: resolved.payer.memberId,
     participantIds,
-    participantShares
+    participantShares,
+    notes: input.parsed.isBorrowing ? "借款" : undefined
   });
 
   return {
@@ -1079,7 +1080,7 @@ async function handleExpenseInput(event: LineMessageEvent, text: string) {
     if (zeroShare) {
       failures.push({
         block,
-        reason: `若要記錄中途還款，請輸入：還款${parsed.amount}${parsed.payerName}給${zeroShare.name}`
+        reason: `若要記錄中途還款，請輸入：${parsed.payerName}還款${parsed.amount}給${zeroShare.name}`
       });
       continue;
     }
@@ -1123,6 +1124,8 @@ async function handleExpenseInput(event: LineMessageEvent, text: string) {
       "晚餐1000我付",
       "晚餐1000我付 小明 小華分",
       "晚餐1000我付400小明200小華",
+      "小八玩偶14000小華付小明借款",
+      "小明跟小華借14000",
       "",
       ...failures.map((failure) => `- ${failure.block}：${failure.reason}`)
     ].join("\n");
@@ -1271,10 +1274,16 @@ async function handleRecentExpenses(event: LineMessageEvent) {
   }
 
   const expenses = [...recent.expenses].reverse();
+  const borrowingExpenses = expenses.filter((expense) => expense.notes === "借款");
+  const regularExpenses = expenses.filter((expense) => expense.notes !== "借款");
   const expenseLines =
-    expenses.length > 0
-      ? expenses.map((expense) => `${expense.title}${formatAmountForDisplay(expense.amountCents)}`)
+    regularExpenses.length > 0
+      ? regularExpenses.map((expense) => `${expense.title}${formatAmountForDisplay(expense.amountCents)}`)
       : ["目前沒有支出。"];
+  const borrowingLines = borrowingExpenses.map((expense) => {
+    const borrower = expense.participants[0]?.member.name ?? "未知成員";
+    return `${borrower} → 跟${expense.payer.name}借${formatAmountForDisplay(expense.amountCents)}`;
+  });
   const repayments = [...recentRepayments.repayments].reverse();
   const repaymentLines = repayments.map(
     (repayment) =>
@@ -1286,6 +1295,7 @@ async function handleRecentExpenses(event: LineMessageEvent) {
     "目前支出：",
     "",
     ...expenseLines,
+    ...(borrowingLines.length > 0 ? ["", "借款紀錄：", "", ...borrowingLines] : []),
     ...(repaymentLines.length > 0 ? ["", "還款紀錄：", "", ...repaymentLines] : []),
     "",
     buildSettlementText(buildSettlementLines(snapshot))
