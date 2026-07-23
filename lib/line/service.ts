@@ -1338,7 +1338,8 @@ async function handleDeleteExpensePrompt(event: LineMessageEvent) {
     "",
     ...expenses.map((expense) => `${expense.title}${formatAmountForDisplay(expense.amountCents)}`),
     "",
-    "請輸入要刪除的項目名稱"
+    "請輸入要刪除的項目名稱。",
+    "如誤按可輸入「取消」，或直接輸入其他指令。"
   ].join("\n");
 }
 
@@ -1652,6 +1653,7 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
     return null;
   }
 
+  let parsed = parseLineCommand(rawText);
   const deletePendingState = lineUserId
     ? await getPendingActionState({
         chatId,
@@ -1670,20 +1672,28 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
       return "已取消刪除支出。";
     }
 
-    if (!deletePendingState.pending.targetLedgerId) {
+    if (parsed.kind !== "ignored" || looksLikeExpenseInput(rawText)) {
       await clearPendingAction({
         chatId,
         requesterLineUserId: lineUserId,
         actionType: PendingActionType.delete_recent_expense
       });
-      return "刪除操作已失效，請重新輸入「刪除支出」。";
-    }
+    } else {
+      if (!deletePendingState.pending.targetLedgerId) {
+        await clearPendingAction({
+          chatId,
+          requesterLineUserId: lineUserId,
+          actionType: PendingActionType.delete_recent_expense
+        });
+        return "刪除操作已失效，請重新輸入「刪除支出」。";
+      }
 
-    return handleDeleteExpenseByName(
-      event,
-      rawText,
-      deletePendingState.pending.targetLedgerId
-    );
+      return handleDeleteExpenseByName(
+        event,
+        rawText,
+        deletePendingState.pending.targetLedgerId
+      );
+    }
   }
 
   const archivePendingState = lineUserId
@@ -1722,8 +1732,6 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
       archivePendingState.pending.targetLedgerId
     );
   }
-
-  let parsed = parseLineCommand(rawText);
 
   const activityNamePendingState = lineUserId
     ? await getPendingActionState({
