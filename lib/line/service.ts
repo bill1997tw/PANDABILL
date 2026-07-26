@@ -84,6 +84,11 @@ import type {
   LineMessageEvent,
   ParsedLineCommand
 } from "@/lib/line/types";
+import {
+  getTravelPairingErrorMessage,
+  parseTravelPairingCommand,
+  redeemTravelPairing
+} from "@/lib/travel-cloud";
 
 type ChatContext = {
   chatId: string;
@@ -1651,6 +1656,24 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
 
   if (rawText === "設定") {
     return null;
+  }
+
+  const travelPairingCode = parseTravelPairingCommand(rawText);
+  if (travelPairingCode) {
+    try {
+      await redeemTravelPairing({
+        pairingCode: travelPairingCode,
+        chatId,
+        chatType
+      });
+      return [
+        "已完成旅遊小本本連動。",
+        "這個 LINE 群組之後可連結到同一趟旅程；目前既有小二帳本仍照常使用。"
+      ].join("\n");
+    } catch (error) {
+      console.error("Travel journal pairing failed", { chatType, error });
+      return getTravelPairingErrorMessage(error);
+    }
   }
 
   let parsed = parseLineCommand(rawText);
