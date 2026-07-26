@@ -91,6 +91,7 @@ import {
   parseTravelPairingCommand,
   redeemTravelMemberLink,
   redeemTravelPairing,
+  syncTravelExpenseVoidReliably,
   syncTravelExpenseReliably,
   syncTravelRepaymentReliably
 } from "@/lib/travel-cloud";
@@ -1462,6 +1463,14 @@ async function handleDeleteExpenseByName(
       id: expense.id
     }
   });
+  const cloudResult = lineUserId
+    ? await syncTravelExpenseVoidReliably({
+        localEntryId: expense.id,
+        entryKind: expense.notes === "借款" ? "borrowing" : "expense",
+        chatId,
+        actorLineUserId: lineUserId
+      })
+    : { status: "not_bound" as const };
   await clearPendingAction({
     chatId,
     requesterLineUserId: lineUserId,
@@ -1470,11 +1479,15 @@ async function handleDeleteExpenseByName(
 
   const snapshot = await getSettlementSnapshot(group.groupId);
 
-  return [
+  const replyLines = [
     `已刪除支出：${expense.title}${formatAmountForDisplay(expense.amountCents)}`,
-    "",
-    buildSettlementText(buildSettlementLines(snapshot))
-  ].join("\n");
+    ""
+  ];
+  if (cloudResult.status === "warning") {
+    replyLines.push("旅遊小本本同步提醒：", cloudResult.message, "");
+  }
+  replyLines.push(buildSettlementText(buildSettlementLines(snapshot)));
+  return replyLines.join("\n");
 }
 
 async function handleSettlement(event: LineMessageEvent) {

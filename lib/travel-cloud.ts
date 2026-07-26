@@ -261,6 +261,41 @@ export type TravelRepaymentSyncInput = {
   occurredAt: string;
 };
 
+export type TravelExpenseVoidSyncInput = {
+  localEntryId: string;
+  entryKind: "expense" | "borrowing";
+  chatId: string;
+  actorLineUserId: string;
+  reason?: string;
+};
+
+export async function syncTravelExpenseVoid(
+  input: TravelExpenseVoidSyncInput
+): Promise<TravelCloudSyncResult> {
+  try {
+    const { hmacSecret } = getConfig();
+    if (!(await getBoundTripId(input.chatId, hmacSecret))) {
+      return { status: "not_bound" };
+    }
+    await callRpc("void_line_ledger_entry", {
+      target_line_chat_key: createLineChatKey(input.chatId, hmacSecret),
+      target_actor_line_user_key: createLineUserKey(
+        input.actorLineUserId,
+        hmacSecret
+      ),
+      bridge_entry_id: stableBridgeEntryId(input.entryKind, input.localEntryId),
+      void_reason: input.reason ?? "Deleted from LINE split-bill bot"
+    });
+    return { status: "synced" };
+  } catch {
+    return {
+      status: "warning",
+      message:
+        "小二已刪除支出，但旅遊小本本同步暫時失敗；系統會自動重試。"
+    };
+  }
+}
+
 export async function syncTravelRepayment(
   input: TravelRepaymentSyncInput
 ): Promise<TravelCloudSyncResult> {
@@ -305,9 +340,12 @@ function retryAt(attempts: number) {
 }
 
 async function rememberFailedSync(
-  entryType: "expense" | "repayment",
+  entryType: "expense" | "repayment" | "void",
   localEntryId: string,
-  payload: TravelExpenseSyncInput | TravelRepaymentSyncInput,
+  payload:
+    | TravelExpenseSyncInput
+    | TravelRepaymentSyncInput
+    | TravelExpenseVoidSyncInput,
   message: string
 ) {
   await db.travelCloudSyncJob.upsert({
@@ -366,6 +404,24 @@ export async function syncTravelRepaymentReliably(
   return result;
 }
 
+export async function syncTravelExpenseVoidReliably(
+  input: TravelExpenseVoidSyncInput
+): Promise<TravelCloudSyncResult> {
+  const result = await syncTravelExpenseVoid(input);
+  if (result.status === "warning") {
+    try {
+      await rememberFailedSync("void", input.localEntryId, input, result.message);
+    } catch (error) {
+      console.error("Failed to queue travel expense void sync", error);
+    }
+  } else {
+    await db.travelCloudSyncJob.deleteMany({
+      where: { entryType: "void", localEntryId: input.localEntryId }
+    });
+  }
+  return result;
+}
+
 export async function retryTravelCloudSyncJobs(limit = 3) {
   const jobs = await db.travelCloudSyncJob.findMany({
     where: {
@@ -380,7 +436,13 @@ export async function retryTravelCloudSyncJobs(limit = 3) {
     const result =
       job.entryType === "expense"
         ? await syncTravelExpense(job.payload as unknown as TravelExpenseSyncInput)
-        : await syncTravelRepayment(job.payload as unknown as TravelRepaymentSyncInput);
+        : job.entryType === "repayment"
+          ? await syncTravelRepayment(
+              job.payload as unknown as TravelRepaymentSyncInput
+            )
+          : await syncTravelExpenseVoid(
+              job.payload as unknown as TravelExpenseVoidSyncInput
+            );
 
     if (result.status !== "warning") {
       await db.travelCloudSyncJob.deleteMany({ where: { id: job.id } });
