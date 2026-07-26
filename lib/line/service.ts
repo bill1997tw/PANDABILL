@@ -813,8 +813,7 @@ function resolveMemberByName(
 
   const exact = participants.find(
     (participant) =>
-      normalizeName(participant.displayName) === normalized ||
-      normalizeName(participant.memberName) === normalized
+      normalizeName(participant.displayName) === normalized
   );
 
   if (exact) {
@@ -824,29 +823,14 @@ function resolveMemberByName(
     };
   }
 
-  const partial = participants.filter(
-    (participant) =>
-      normalizeName(participant.displayName).includes(normalized) ||
-      normalizeName(participant.memberName).includes(normalized)
-  );
-
-  if (partial.length === 1 && partial[0]) {
-    return {
-      ok: true,
-      member: partial[0]
-    };
-  }
-
-  if (partial.length > 1) {
-    return {
-      ok: false,
-      reason: `「${input}」對應到多位成員，請輸入更完整的名字`
-    };
-  }
-
   return {
     ok: false,
-    reason: `找不到成員：${input}`
+    reason: [
+      `找不到成員：${input}`,
+      `目前可用成員：${participants
+        .map((participant) => participant.displayName)
+        .join("、")}`
+    ].join("\n")
   };
 }
 
