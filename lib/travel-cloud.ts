@@ -1,4 +1,7 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
+import { Prisma } from "@prisma/client";
+
+import { db } from "@/lib/db";
 
 type LineChatType = "group" | "room";
 type SupabaseRpcError = { message?: string };
@@ -59,6 +62,265 @@ async function callRpc<T>(
   }
 
   return response.json() as Promise<T>;
+}
+
+function stableBridgeEntryId(kind: string, localId: string) {
+  const bytes = createHash("sha256")
+    .update(`${kind}:${localId}`, "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20)
+  ].join("-");
+}
+
+function toTwdMinorUnits(amountCents: number, allowZero = false) {
+  const invalidSign = allowZero ? amountCents < 0 : amountCents <= 0;
+  if (!Number.isSafeInteger(amountCents) || invalidSign || amountCents % 100 !== 0) {
+    throw new Error("travel_cloud_fractional_twd_unsupported");
+  }
+  return amountCents / 100;
+}
+
+async function getBoundTripId(chatId: string, secret: string) {
+  const binding = await callRpc<{ trip_id: string } | null>(
+    "get_line_trip_binding_by_chat_key",
+    { target_line_chat_key: createLineChatKey(chatId, secret) }
+  );
+  return binding?.trip_id ?? null;
+}
+
+export type TravelCloudSyncResult =
+  | { status: "not_bound" | "synced" }
+  | { status: "warning"; message: string };
+
+export type TravelExpenseSyncInput = {
+  localEntryId: string;
+  chatId: string;
+  actorLineUserId: string;
+  title: string;
+  amountCents: number;
+  occurredAt: string;
+  payerLineUserId: string;
+  shares: Array<{ lineUserId: string; shareCents: number }>;
+  borrowing?: {
+    borrowerLineUserId: string;
+    lenderLineUserId: string;
+  };
+};
+
+export async function syncTravelExpense(
+  input: TravelExpenseSyncInput
+): Promise<TravelCloudSyncResult> {
+  try {
+    const { hmacSecret } = getConfig();
+    if (!(await getBoundTripId(input.chatId, hmacSecret))) {
+      return { status: "not_bound" };
+    }
+    const common = {
+      target_line_chat_key: createLineChatKey(input.chatId, hmacSecret),
+      target_actor_line_user_key: createLineUserKey(input.actorLineUserId, hmacSecret),
+      bridge_entry_id: stableBridgeEntryId(
+        input.borrowing ? "borrowing" : "expense",
+        input.localEntryId
+      )
+    };
+    if (input.borrowing) {
+      await callRpc("create_line_ledger_borrowing", {
+        ...common,
+        borrowing_amount_minor: toTwdMinorUnits(input.amountCents),
+        borrowing_currency: "TWD",
+        borrowing_borrower_line_user_key: createLineUserKey(
+          input.borrowing.borrowerLineUserId,
+          hmacSecret
+        ),
+        borrowing_lender_line_user_key: createLineUserKey(
+          input.borrowing.lenderLineUserId,
+          hmacSecret
+        ),
+        borrowing_occurred_at: input.occurredAt
+      });
+    } else {
+      await callRpc("create_line_ledger_expense", {
+        ...common,
+        expense_title: input.title,
+        expense_amount_minor: toTwdMinorUnits(input.amountCents),
+        expense_currency: "TWD",
+        expense_payer_line_user_key: createLineUserKey(
+          input.payerLineUserId,
+          hmacSecret
+        ),
+        expense_shares: input.shares.map((share) => ({
+          line_user_key: createLineUserKey(share.lineUserId, hmacSecret),
+          amount_minor: toTwdMinorUnits(share.shareCents, true)
+        })),
+        expense_occurred_at: input.occurredAt
+      });
+    }
+    return { status: "synced" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/line_(?:payer|participant|transfer_member)_not_linked/u.test(message)) {
+      return {
+        status: "warning",
+        message: "小二已記帳，但有成員尚未連結旅遊小本本 LINE 身分，所以雲端尚未同步。"
+      };
+    }
+    return {
+      status: "warning",
+      message: "小二已記帳，但旅遊小本本同步暫時失敗；相同紀錄 ID 不會重複寫入。"
+    };
+  }
+}
+
+export type TravelRepaymentSyncInput = {
+  localEntryId: string;
+  chatId: string;
+  actorLineUserId: string;
+  payerLineUserId: string;
+  receiverLineUserId: string;
+  amountCents: number;
+  occurredAt: string;
+};
+
+export async function syncTravelRepayment(
+  input: TravelRepaymentSyncInput
+): Promise<TravelCloudSyncResult> {
+  try {
+    const { hmacSecret } = getConfig();
+    if (!(await getBoundTripId(input.chatId, hmacSecret))) {
+      return { status: "not_bound" };
+    }
+    await callRpc("create_line_ledger_repayment", {
+      target_line_chat_key: createLineChatKey(input.chatId, hmacSecret),
+      target_actor_line_user_key: createLineUserKey(input.actorLineUserId, hmacSecret),
+      bridge_entry_id: stableBridgeEntryId("repayment", input.localEntryId),
+      repayment_amount_minor: toTwdMinorUnits(input.amountCents),
+      repayment_currency: "TWD",
+      repayment_payer_line_user_key: createLineUserKey(input.payerLineUserId, hmacSecret),
+      repayment_receiver_line_user_key: createLineUserKey(
+        input.receiverLineUserId,
+        hmacSecret
+      ),
+      repayment_occurred_at: input.occurredAt
+    });
+    return { status: "synced" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    return {
+      status: "warning",
+      message: /line_transfer_member_not_linked/u.test(message)
+        ? "小二已記錄還款，但付款人或收款人尚未連結旅遊小本本 LINE 身分。"
+        : "小二已記錄還款，但旅遊小本本同步暫時失敗；相同紀錄 ID 不會重複寫入。"
+    };
+  }
+}
+
+function retryAt(attempts: number) {
+  const delayMinutes = Math.min(60, 2 ** Math.min(attempts, 6));
+  return new Date(Date.now() + delayMinutes * 60_000);
+}
+
+async function rememberFailedSync(
+  entryType: "expense" | "repayment",
+  localEntryId: string,
+  payload: TravelExpenseSyncInput | TravelRepaymentSyncInput,
+  message: string
+) {
+  await db.travelCloudSyncJob.upsert({
+    where: {
+      entryType_localEntryId: { entryType, localEntryId }
+    },
+    create: {
+      entryType,
+      localEntryId,
+      payload: payload as unknown as Prisma.InputJsonValue,
+      lastError: message,
+      nextAttemptAt: retryAt(0)
+    },
+    update: {
+      payload: payload as unknown as Prisma.InputJsonValue,
+      status: "pending",
+      lastError: message,
+      nextAttemptAt: retryAt(0)
+    }
+  });
+}
+
+export async function syncTravelExpenseReliably(
+  input: TravelExpenseSyncInput
+): Promise<TravelCloudSyncResult> {
+  const result = await syncTravelExpense(input);
+  if (result.status === "warning") {
+    try {
+      await rememberFailedSync("expense", input.localEntryId, input, result.message);
+    } catch (error) {
+      console.error("Failed to queue travel expense sync", error);
+    }
+  } else {
+    await db.travelCloudSyncJob.deleteMany({
+      where: { entryType: "expense", localEntryId: input.localEntryId }
+    });
+  }
+  return result;
+}
+
+export async function syncTravelRepaymentReliably(
+  input: TravelRepaymentSyncInput
+): Promise<TravelCloudSyncResult> {
+  const result = await syncTravelRepayment(input);
+  if (result.status === "warning") {
+    try {
+      await rememberFailedSync("repayment", input.localEntryId, input, result.message);
+    } catch (error) {
+      console.error("Failed to queue travel repayment sync", error);
+    }
+  } else {
+    await db.travelCloudSyncJob.deleteMany({
+      where: { entryType: "repayment", localEntryId: input.localEntryId }
+    });
+  }
+  return result;
+}
+
+export async function retryTravelCloudSyncJobs(limit = 3) {
+  const jobs = await db.travelCloudSyncJob.findMany({
+    where: {
+      status: "pending",
+      nextAttemptAt: { lte: new Date() }
+    },
+    orderBy: { createdAt: "asc" },
+    take: limit
+  });
+
+  for (const job of jobs) {
+    const result =
+      job.entryType === "expense"
+        ? await syncTravelExpense(job.payload as unknown as TravelExpenseSyncInput)
+        : await syncTravelRepayment(job.payload as unknown as TravelRepaymentSyncInput);
+
+    if (result.status !== "warning") {
+      await db.travelCloudSyncJob.deleteMany({ where: { id: job.id } });
+      continue;
+    }
+
+    const attempts = job.attempts + 1;
+    await db.travelCloudSyncJob.update({
+      where: { id: job.id },
+      data: {
+        attempts,
+        lastError: result.message,
+        nextAttemptAt: retryAt(attempts)
+      }
+    });
+  }
 }
 
 export async function redeemTravelPairing(input: {

@@ -89,7 +89,9 @@ import {
   parseTravelMemberLinkCommand,
   parseTravelPairingCommand,
   redeemTravelMemberLink,
-  redeemTravelPairing
+  redeemTravelPairing,
+  syncTravelExpenseReliably,
+  syncTravelRepaymentReliably
 } from "@/lib/travel-cloud";
 
 type ChatContext = {
@@ -1042,13 +1044,58 @@ async function createParsedExpense(input: {
     notes: input.parsed.isBorrowing ? "借款" : undefined
   });
 
+  let cloudSyncNotice: string | undefined;
+  const { chatId } = getChatContext(input.event.source);
+  const participantRefs = created.expense.participants.map((participant) =>
+    resolved.active.participants.find(
+      (candidate) => candidate.memberId === participant.member.id
+    )
+  );
+  const payerLineUserId = resolved.payer.lineUserId;
+
+  if (
+    resolved.lineUserId &&
+    payerLineUserId &&
+    participantRefs.every(
+      (participant): participant is ParticipantRef =>
+        Boolean(participant?.lineUserId)
+    )
+  ) {
+    const cloudResult = await syncTravelExpenseReliably({
+      localEntryId: created.expense.id,
+      chatId,
+      actorLineUserId: resolved.lineUserId,
+      title: created.expense.title,
+      amountCents: created.expense.amountCents,
+      occurredAt: created.expense.createdAt,
+      payerLineUserId,
+      shares: created.expense.participants.map((participant, index) => ({
+        lineUserId: participantRefs[index]!.lineUserId!,
+        shareCents: participant.shareCents
+      })),
+      borrowing: input.parsed.isBorrowing
+        ? {
+            borrowerLineUserId: participantRefs[0]!.lineUserId!,
+            lenderLineUserId: payerLineUserId
+          }
+        : undefined
+    });
+    if (cloudResult.status === "warning") {
+      cloudSyncNotice = cloudResult.message;
+    }
+  } else if (resolved.lineUserId) {
+    cloudSyncNotice =
+      "小二已記帳，但有成員尚未建立可驗證的 LINE 身分，所以旅遊小本本尚未同步。";
+  }
+
   return {
     ok: true as const,
     title: created.expense.title,
     amountCents: created.expense.amountCents,
     payerName: resolved.payer.displayName,
     participantNames,
-    excludedNames
+    excludedNames,
+    cloudSyncNotice
   };
 }
 
@@ -1071,6 +1118,7 @@ async function handleExpenseInput(event: LineMessageEvent, text: string) {
     payerName: string;
     participantNames: string[];
     excludedNames: string[];
+    cloudSyncNotice?: string;
   }> = [];
   const failures: Array<{ block: string; reason: string }> = [];
 
@@ -1170,6 +1218,17 @@ async function handleExpenseInput(event: LineMessageEvent, text: string) {
     );
   }
 
+  const cloudNotices = [
+    ...new Set(
+      successes
+        .map((success) => success.cloudSyncNotice)
+        .filter((notice): notice is string => Boolean(notice))
+    )
+  ];
+  if (cloudNotices.length > 0) {
+    replyLines.push("", "旅遊小本本同步提醒：", ...cloudNotices);
+  }
+
   replyLines.push("", buildSettlementText(buildSettlementLines(snapshot)));
 
   return replyLines.join("\n");
@@ -1243,12 +1302,32 @@ async function handleRepaymentInput(event: LineMessageEvent, text: string) {
     ].join("\n");
   }
 
-  await createRepaymentInGroup({
+  const createdRepayment = await createRepaymentInGroup({
     groupId: group.groupId,
     amount: parsed.amount,
     payerId: payer.member.memberId,
     receiverId: receiver.member.memberId
   });
+
+  let cloudSyncNotice: string | undefined;
+  if (lineUserId && payer.member.lineUserId && receiver.member.lineUserId) {
+    const { chatId } = getChatContext(event.source);
+    const cloudResult = await syncTravelRepaymentReliably({
+      localEntryId: createdRepayment.repayment.id,
+      chatId,
+      actorLineUserId: lineUserId,
+      payerLineUserId: payer.member.lineUserId,
+      receiverLineUserId: receiver.member.lineUserId,
+      amountCents: createdRepayment.repayment.amountCents,
+      occurredAt: createdRepayment.repayment.createdAt.toISOString()
+    });
+    if (cloudResult.status === "warning") {
+      cloudSyncNotice = cloudResult.message;
+    }
+  } else if (lineUserId) {
+    cloudSyncNotice =
+      "小二已記錄還款，但相關成員尚未建立可驗證的 LINE 身分，旅遊小本本尚未同步。";
+  }
 
   const remainingCents = outstanding.amountCents - amountCents;
   const afterSnapshot = await getSettlementSnapshot(group.groupId);
@@ -1256,6 +1335,7 @@ async function handleRepaymentInput(event: LineMessageEvent, text: string) {
   return [
     "已記錄還款：",
     `${payer.member.displayName} → ${receiver.member.displayName} ${formatCents(amountCents)}`,
+    ...(cloudSyncNotice ? ["", "旅遊小本本同步提醒：", cloudSyncNotice] : []),
     "",
     `原待還：${outstanding.amountDisplay}`,
     remainingCents > 0 ? `剩餘：${formatCents(remainingCents)}` : "此筆已還清。",

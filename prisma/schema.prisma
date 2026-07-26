@@ -246,3 +246,19 @@ model LineChatBinding {
 
   @@index([groupId, updatedAt])
 }
+
+model TravelCloudSyncJob {
+  id           String   @id @default(cuid())
+  entryType    String
+  localEntryId String
+  payload      Json
+  status       String   @default("pending")
+  attempts     Int      @default(0)
+  lastError    String?
+  nextAttemptAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([entryType, localEntryId])
+  @@index([status, nextAttemptAt])
+}

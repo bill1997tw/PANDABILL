@@ -6,6 +6,7 @@ import { replyLineText } from "@/lib/line/client";
 import { verifyLineSignature } from "@/lib/line/signature";
 import { handleLineEvent } from "@/lib/line/service";
 import type { LineWebhookBody } from "@/lib/line/types";
+import { retryTravelCloudSyncJobs } from "@/lib/travel-cloud";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,6 +76,12 @@ export async function POST(request: Request) {
       }
     })
   );
+
+  try {
+    await retryTravelCloudSyncJobs();
+  } catch (error) {
+    console.error("Travel cloud retry failed", error);
+  }
 
   return NextResponse.json({ ok: true });
 }
