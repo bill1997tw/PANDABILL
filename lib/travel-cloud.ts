@@ -97,6 +97,49 @@ async function getBoundTripId(chatId: string, secret: string) {
   return binding?.trip_id ?? null;
 }
 
+export type TravelTripRoster = {
+  tripId: string;
+  tripTitle: string;
+  members: string[];
+};
+
+export async function getTravelTripRoster(
+  chatId: string
+): Promise<TravelTripRoster | null> {
+  const { hmacSecret } = getConfig();
+  const roster = await callRpc<{
+    trip_id?: unknown;
+    trip_title?: unknown;
+    members?: unknown;
+  } | null>("get_line_trip_roster_by_chat_key", {
+    target_line_chat_key: createLineChatKey(chatId, hmacSecret)
+  });
+
+  if (!roster) {
+    return null;
+  }
+
+  const tripId = typeof roster.trip_id === "string" ? roster.trip_id.trim() : "";
+  const tripTitle =
+    typeof roster.trip_title === "string" ? roster.trip_title.trim() : "";
+  const members = Array.isArray(roster.members)
+    ? [
+        ...new Set(
+          roster.members
+            .filter((member): member is string => typeof member === "string")
+            .map((member) => member.trim())
+            .filter(Boolean)
+        )
+      ]
+    : [];
+
+  if (!tripId || !tripTitle || members.length === 0) {
+    throw new Error("travel_trip_roster_invalid");
+  }
+
+  return { tripId, tripTitle, members };
+}
+
 export type TravelCloudSyncResult =
   | { status: "not_bound" | "synced" }
   | { status: "warning"; message: string };

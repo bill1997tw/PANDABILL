@@ -85,6 +85,7 @@ import type {
   ParsedLineCommand
 } from "@/lib/line/types";
 import {
+  getTravelTripRoster,
   getTravelPairingErrorMessage,
   parseTravelMemberLinkCommand,
   parseTravelPairingCommand,
@@ -1748,9 +1749,57 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
         chatId,
         chatType
       });
+      const roster = await getTravelTripRoster(chatId);
+      const group = await getGroupIdOrReply(event);
+
+      if (!roster || !group.ok) {
+        return [
+          "已完成旅遊小本本連動。",
+          "目前無法讀取行程成員；小二既有帳本不受影響，請稍後再同步。"
+        ].join("\n");
+      }
+
+      if (!lineUserId) {
+        return [
+          `已完成旅遊小本本連動：${roster.tripTitle}`,
+          "",
+          `已讀取成員：${formatMemberList(roster.members)}`,
+          "",
+          "LINE 未提供操作者身分，因此尚未建立小二活動。"
+        ].join("\n");
+      }
+
+      const existingLedger = await getActiveLedger(group.groupId);
+      if (existingLedger) {
+        return [
+          `已完成旅遊小本本連動：${roster.tripTitle}`,
+          "",
+          `已讀取成員：${formatMemberList(roster.members)}`,
+          "",
+          `目前已有進行中的活動「${existingLedger.name}」，為避免覆蓋既有帳目，尚未自動替換。`
+        ].join("\n");
+      }
+
+      await createLedgerForGroup(group.groupId, roster.tripTitle, {
+        lineUserId,
+        displayName: roster.members[0]!
+      });
+      if (roster.members.length > 1) {
+        await addMembersToCollectingLedger({
+          groupId: group.groupId,
+          requesterLineUserId: lineUserId,
+          names: roster.members.slice(1)
+        });
+      }
+
       return [
-        "已完成旅遊小本本連動。",
-        "這個 LINE 群組之後可連結到同一趟旅程；目前既有小二帳本仍照常使用。"
+        `已完成旅遊小本本連動：${roster.tripTitle}`,
+        "",
+        "已從旅遊小本本帶入成員：",
+        formatMemberList(roster.members),
+        "",
+        "請確認名單；正確請輸入「確認成員」。",
+        "這些成員不必先註冊或綁定 LINE。"
       ].join("\n");
     } catch (error) {
       console.error("Travel journal pairing failed", { chatType, error });
