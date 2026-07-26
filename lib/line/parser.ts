@@ -12,7 +12,7 @@ function splitNames(payload: string) {
 }
 
 function parseShortcut(text: string): ParsedLineCommand | null {
-  const match = text.match(/^([1-7])(?:\s+(.*))?$/u);
+  const match = text.match(/^([1-8])(?:\s+(.*))?$/u);
 
   if (!match) {
     return null;
@@ -126,6 +126,10 @@ export function parseLineCommand(text: string): ParsedLineCommand {
 
   if (normalized === "刪除支出") {
     return { kind: "delete-last-expense" };
+  }
+
+  if (normalized === "更正支出" || normalized === "修改支出") {
+    return { kind: "correct-expense" };
   }
 
   if (normalized === "確認成員") {

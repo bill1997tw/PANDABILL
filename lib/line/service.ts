@@ -265,6 +265,10 @@ async function resolveShortcutCommand(
     if (number === 7) {
       return { kind: "delete-last-expense" };
     }
+
+    if (number === 8) {
+      return { kind: "correct-expense" };
+    }
   }
 
   if (menuMode === "settlement") {
@@ -1073,6 +1077,7 @@ async function createParsedExpense(input: {
 
   return {
     ok: true as const,
+    localEntryId: created.expense.id,
     title: created.expense.title,
     amountCents: created.expense.amountCents,
     payerName: resolved.payer.displayName,
@@ -1410,6 +1415,202 @@ async function handleDeleteExpensePrompt(event: LineMessageEvent) {
   ].join("\n");
 }
 
+function findExpenseByInput<
+  T extends { title: string; amountCents: number }
+>(expenses: T[], input: string) {
+  const target = normalizeName(input);
+  return expenses.find((item) => {
+    const label = `${item.title}${formatAmountForDisplay(item.amountCents)}`;
+    return normalizeName(label) === target || normalizeName(item.title) === target;
+  });
+}
+
+async function handleCorrectExpensePrompt(event: LineMessageEvent) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const recent = await getRecentExpenses(group.groupId, 50);
+  if (!recent.activeLedger) {
+    return getNoActiveLedgerText();
+  }
+  if (recent.expenses.length === 0) {
+    return "目前沒有可更正的支出。";
+  }
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  await createPendingAction({
+    groupId: group.groupId,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.awaiting_expense_details,
+    targetLedgerId: recent.activeLedger.id,
+    payload: { stage: "select-expense-to-correct" }
+  });
+
+  return [
+    "目前支出：",
+    "",
+    ...recent.expenses.map(
+      (expense, index) =>
+        `${index + 1}. ${expense.title}${formatAmountForDisplay(expense.amountCents)}`
+    ),
+    "",
+    "請輸入要更正的編號或項目名稱。",
+    "如誤按可輸入「取消」，或直接輸入其他指令。"
+  ].join("\n");
+}
+
+async function handleCorrectExpenseSelection(
+  event: LineMessageEvent,
+  text: string,
+  targetLedgerId: string
+) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+  if (!group.ok) {
+    return group.reply;
+  }
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  const expenses = await db.expense.findMany({
+    where: { groupId: group.groupId, ledgerId: targetLedgerId },
+    orderBy: { createdAt: "desc" },
+    take: 50
+  });
+  const selectedIndex = /^\d+$/u.test(text.trim())
+    ? Number(text.trim()) - 1
+    : -1;
+  const expense =
+    selectedIndex >= 0
+      ? expenses[selectedIndex]
+      : findExpenseByInput(expenses, text);
+  if (!expense) {
+    return "找不到這筆支出，請重新輸入項目名稱。";
+  }
+
+  await createPendingAction({
+    groupId: group.groupId,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.awaiting_expense_details,
+    targetExpenseId: expense.id,
+    targetLedgerId,
+    payload: { stage: "enter-corrected-expense" }
+  });
+
+  return [
+    `準備更正：${expense.title}${formatAmountForDisplay(expense.amountCents)}`,
+    "",
+    "請重新輸入完整的新支出內容。",
+    "例如：晚餐1200濠濠付",
+    "",
+    "新內容成功建立後，舊紀錄才會作廢。",
+    "放棄請輸入「取消」。"
+  ].join("\n");
+}
+
+async function handleCorrectExpenseDetails(
+  event: LineMessageEvent,
+  text: string,
+  targetLedgerId: string,
+  targetExpenseId: string
+) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+  if (!group.ok) {
+    return group.reply;
+  }
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  const oldExpense = await db.expense.findFirst({
+    where: {
+      id: targetExpenseId,
+      groupId: group.groupId,
+      ledgerId: targetLedgerId
+    }
+  });
+  if (!oldExpense) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: PendingActionType.awaiting_expense_details
+    });
+    return "原支出已不存在，更正操作已取消。";
+  }
+  const activeLedger = await getActiveLedger(group.groupId);
+  if (!activeLedger || activeLedger.id !== targetLedgerId) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: PendingActionType.awaiting_expense_details
+    });
+    return "目前活動已變更，為避免改錯帳本，本次更正已取消。";
+  }
+
+  const blocks = splitExpenseBlocks(text);
+  if (blocks.length !== 1 || !blocks[0]) {
+    return "更正時一次只能輸入一筆完整支出，請重新輸入。";
+  }
+  const parsed = parseExpenseBlock(blocks[0]);
+  if ("reason" in parsed) {
+    return `無法讀取新的支出內容：${parsed.reason}\n請重新輸入，或輸入「取消」。`;
+  }
+  const zeroShare = parsed.shares.find((share) => Number(share.amount) === 0);
+  if (zeroShare) {
+    return `若要記錄還款，請另行輸入：${parsed.payerName}還款${parsed.amount}給${zeroShare.name}`;
+  }
+
+  const corrected = await createParsedExpense({
+    groupId: group.groupId,
+    event,
+    parsed
+  });
+  if (!corrected.ok) {
+    return `${corrected.reply}\n請重新輸入，或輸入「取消」。`;
+  }
+
+  await db.expense.delete({ where: { id: oldExpense.id } });
+  const voidResult = await syncTravelExpenseVoidReliably({
+    localEntryId: oldExpense.id,
+    entryKind: oldExpense.notes === "借款" ? "borrowing" : "expense",
+    chatId,
+    actorLineUserId: lineUserId,
+    reason: `Corrected by LINE entry ${corrected.localEntryId}`,
+    waitForExpenseLocalEntryId: corrected.localEntryId
+  });
+  await clearPendingAction({
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.awaiting_expense_details
+  });
+
+  const snapshot = await getSettlementSnapshot(group.groupId);
+  const notices = [corrected.cloudSyncNotice, voidResult.status === "warning"
+    ? voidResult.message
+    : undefined].filter((notice): notice is string => Boolean(notice));
+
+  return [
+    "已完成支出更正：",
+    `原紀錄：${oldExpense.title}${formatAmountForDisplay(oldExpense.amountCents)}（已作廢）`,
+    `新紀錄：${corrected.title}${formatAmountForDisplay(corrected.amountCents)}｜${corrected.payerName}付`,
+    ...(notices.length > 0
+      ? ["", "旅遊小本本同步提醒：", ...new Set(notices)]
+      : []),
+    "",
+    buildSettlementText(buildSettlementLines(snapshot))
+  ].join("\n");
+}
+
 async function handleDeleteExpenseByName(
   event: LineMessageEvent,
   text: string,
@@ -1422,7 +1623,6 @@ async function handleDeleteExpenseByName(
     return group.reply;
   }
 
-  const target = normalizeName(text);
   const expenses = await db.expense.findMany({
     where: {
       groupId: group.groupId,
@@ -1433,10 +1633,7 @@ async function handleDeleteExpenseByName(
     },
     take: 50
   });
-  const expense = expenses.find((item) => {
-    const label = `${item.title}${formatAmountForDisplay(item.amountCents)}`;
-    return normalizeName(label) === target || normalizeName(item.title) === target;
-  });
+  const expense = findExpenseByInput(expenses, text);
 
   if (!expense) {
     return "找不到這筆支出，請重新輸入項目名稱。";
@@ -1817,6 +2014,74 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
   }
 
   let parsed = parseLineCommand(rawText);
+  const correctionPendingState = lineUserId
+    ? await getPendingActionState({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.awaiting_expense_details
+      })
+    : null;
+
+  if (correctionPendingState?.pending) {
+    if (parsed.kind === "cancel") {
+      await clearPendingAction({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.awaiting_expense_details
+      });
+      return "已取消更正支出。";
+    }
+
+    const payload =
+      correctionPendingState.pending.payload &&
+      typeof correctionPendingState.pending.payload === "object" &&
+      !Array.isArray(correctionPendingState.pending.payload)
+        ? correctionPendingState.pending.payload
+        : null;
+    const stage =
+      payload && "stage" in payload && typeof payload.stage === "string"
+        ? payload.stage
+        : null;
+
+    if (
+      stage === "select-expense-to-correct" &&
+      correctionPendingState.pending.targetLedgerId &&
+      (parsed.kind === "ignored" || /^\d+$/u.test(rawText))
+    ) {
+      return handleCorrectExpenseSelection(
+        event,
+        rawText,
+        correctionPendingState.pending.targetLedgerId
+      );
+    }
+
+    if (parsed.kind !== "ignored") {
+      await clearPendingAction({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.awaiting_expense_details
+      });
+    } else if (
+      stage === "enter-corrected-expense" &&
+      correctionPendingState.pending.targetLedgerId &&
+      correctionPendingState.pending.targetExpenseId
+    ) {
+      return handleCorrectExpenseDetails(
+        event,
+        rawText,
+        correctionPendingState.pending.targetLedgerId,
+        correctionPendingState.pending.targetExpenseId
+      );
+    } else {
+      await clearPendingAction({
+        chatId,
+        requesterLineUserId: lineUserId,
+        actionType: PendingActionType.awaiting_expense_details
+      });
+      return "更正操作已失效，請重新輸入「更正支出」。";
+    }
+  }
+
   const deletePendingState = lineUserId
     ? await getPendingActionState({
         chatId,
@@ -2021,6 +2286,9 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
 
     case "delete-last-expense":
       return handleDeleteExpensePrompt(event);
+
+    case "correct-expense":
+      return handleCorrectExpensePrompt(event);
 
     case "ignored":
       if (looksLikeExpenseInput(rawText)) {

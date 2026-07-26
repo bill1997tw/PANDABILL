@@ -54,6 +54,7 @@ export type ParsedLineCommand =
   | { kind: "confirm-members" }
   | { kind: "cancel" }
   | { kind: "delete-last-expense" }
+  | { kind: "correct-expense" }
   | { kind: "recent-expenses" }
   | { kind: "expense-help" }
   | { kind: "repayment-help" }

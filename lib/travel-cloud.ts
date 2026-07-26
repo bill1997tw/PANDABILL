@@ -267,12 +267,29 @@ export type TravelExpenseVoidSyncInput = {
   chatId: string;
   actorLineUserId: string;
   reason?: string;
+  waitForExpenseLocalEntryId?: string;
 };
 
 export async function syncTravelExpenseVoid(
   input: TravelExpenseVoidSyncInput
 ): Promise<TravelCloudSyncResult> {
   try {
+    if (input.waitForExpenseLocalEntryId) {
+      const dependency = await db.travelCloudSyncJob.findFirst({
+        where: {
+          entryType: "expense",
+          localEntryId: input.waitForExpenseLocalEntryId
+        },
+        select: { id: true }
+      });
+      if (dependency) {
+        return {
+          status: "warning",
+          message:
+            "新支出仍在等待旅遊小本本同步；舊紀錄會在新支出同步成功後自動作廢。"
+        };
+      }
+    }
     const { hmacSecret } = getConfig();
     if (!(await getBoundTripId(input.chatId, hmacSecret))) {
       return { status: "not_bound" };
