@@ -269,6 +269,10 @@ async function resolveShortcutCommand(
     if (number === 8) {
       return { kind: "correct-expense" };
     }
+
+    if (number === 9) {
+      return { kind: "correct-repayment" };
+    }
   }
 
   if (menuMode === "settlement") {
@@ -303,7 +307,6 @@ async function handleCreateLedgerPrompt(event: LineMessageEvent) {
   if (!lineUserId) {
     return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
   }
-
   await createPendingAction({
     groupId: group.groupId,
     chatId,
@@ -1329,6 +1332,250 @@ async function handleRepaymentInput(event: LineMessageEvent, text: string) {
   ].join("\n");
 }
 
+async function handleCorrectRepaymentPrompt(event: LineMessageEvent) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+  if (!group.ok) {
+    return group.reply;
+  }
+
+  const recent = await getRecentRepayments(group.groupId, 50);
+  if (!recent.activeLedger) {
+    return getNoActiveLedgerText();
+  }
+  if (recent.repayments.length === 0) {
+    return "目前沒有可更正的還款紀錄。";
+  }
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+  const active = await getConfirmedMemberIdsForActiveLedger(group.groupId);
+  const displayNameByMemberId = new Map(
+    active.participants.map((participant) => [
+      participant.memberId,
+      participant.displayName
+    ])
+  );
+
+  await createPendingAction({
+    groupId: group.groupId,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.awaiting_expense_details,
+    targetLedgerId: recent.activeLedger.id,
+    payload: { stage: "select-repayment-to-correct" }
+  });
+
+  return [
+    "目前還款紀錄：",
+    "",
+    ...recent.repayments.map(
+      (repayment, index) =>
+        `${index + 1}. ${displayNameByMemberId.get(repayment.payerId) ?? repayment.payer.name} → ${displayNameByMemberId.get(repayment.receiverId) ?? repayment.receiver.name} ${formatCents(repayment.amountCents)}`
+    ),
+    "",
+    "請輸入要更正的編號。",
+    "如誤按可輸入「取消」，或直接輸入其他指令。"
+  ].join("\n");
+}
+
+async function handleCorrectRepaymentSelection(
+  event: LineMessageEvent,
+  text: string,
+  targetLedgerId: string
+) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+  if (!group.ok) {
+    return group.reply;
+  }
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+  const selectedIndex = /^\d+$/u.test(text.trim())
+    ? Number(text.trim()) - 1
+    : -1;
+  const repayments = await db.repayment.findMany({
+    where: { groupId: group.groupId, ledgerId: targetLedgerId },
+    include: { payer: true, receiver: true },
+    orderBy: { createdAt: "desc" },
+    take: 50
+  });
+  const repayment = selectedIndex >= 0 ? repayments[selectedIndex] : undefined;
+  if (!repayment) {
+    return "找不到這筆還款，請重新輸入清單中的編號。";
+  }
+  const active = await getConfirmedMemberIdsForActiveLedger(group.groupId);
+  const payerDisplayName =
+    active.participants.find(
+      (participant) => participant.memberId === repayment.payerId
+    )?.displayName ?? repayment.payer.name;
+  const receiverDisplayName =
+    active.participants.find(
+      (participant) => participant.memberId === repayment.receiverId
+    )?.displayName ?? repayment.receiver.name;
+
+  await createPendingAction({
+    groupId: group.groupId,
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.awaiting_expense_details,
+    targetExpenseId: repayment.id,
+    targetLedgerId,
+    payload: { stage: "enter-corrected-repayment" }
+  });
+
+  return [
+    `準備更正：${payerDisplayName} → ${receiverDisplayName} ${formatCents(repayment.amountCents)}`,
+    "",
+    "請重新輸入完整的新還款內容。",
+    `例如：${payerDisplayName}還款1000給${receiverDisplayName}`,
+    "",
+    "第一版只允許更正金額，不允許更換還款人或收款人。",
+    "放棄請輸入「取消」。"
+  ].join("\n");
+}
+
+async function handleCorrectRepaymentDetails(
+  event: LineMessageEvent,
+  text: string,
+  targetLedgerId: string,
+  targetRepaymentId: string
+) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  const group = await getGroupIdOrReply(event);
+  if (!group.ok) {
+    return group.reply;
+  }
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  const oldRepayment = await db.repayment.findFirst({
+    where: {
+      id: targetRepaymentId,
+      groupId: group.groupId,
+      ledgerId: targetLedgerId
+    },
+    include: { payer: true, receiver: true }
+  });
+  if (!oldRepayment) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: PendingActionType.awaiting_expense_details
+    });
+    return "原還款已不存在，更正操作已取消。";
+  }
+
+  const activeLedger = await getActiveLedger(group.groupId);
+  if (!activeLedger || activeLedger.id !== targetLedgerId) {
+    await clearPendingAction({
+      chatId,
+      requesterLineUserId: lineUserId,
+      actionType: PendingActionType.awaiting_expense_details
+    });
+    return "目前活動已變更，為避免改錯帳本，本次更正已取消。";
+  }
+
+  const parsed = parseRepaymentInput(text);
+  if ("reason" in parsed) {
+    return `${parsed.reason}\n請重新輸入，或輸入「取消」。`;
+  }
+
+  const actorDisplayName = await resolveActorDisplayName(event);
+  const active = await getConfirmedMemberIdsForActiveLedger(group.groupId);
+  const payer = resolveMemberByName(active.participants, parsed.payerName, {
+    lineUserId,
+    actorDisplayName
+  });
+  const receiver = resolveMemberByName(active.participants, parsed.receiverName, {
+    lineUserId,
+    actorDisplayName
+  });
+  if (!payer.ok) {
+    return `${payer.reason}\n請重新輸入，或輸入「取消」。`;
+  }
+  if (!receiver.ok) {
+    return `${receiver.reason}\n請重新輸入，或輸入「取消」。`;
+  }
+  if (
+    payer.member.memberId !== oldRepayment.payerId ||
+    receiver.member.memberId !== oldRepayment.receiverId
+  ) {
+    return [
+      "安全限制：更正還款只能修改金額，不能更換還款人或收款人。",
+      `原紀錄：${payer.member.displayName} → ${receiver.member.displayName}`,
+      "若人物輸入錯誤，請取消後另行處理。"
+    ].join("\n");
+  }
+
+  const amountCents = parseAmountToCents(parsed.amount);
+  const beforeSnapshot = await getSettlementSnapshot(group.groupId);
+  const remaining =
+    beforeSnapshot?.summary.settlement.find(
+      (item) =>
+        item.fromMemberId === oldRepayment.payerId &&
+        item.toMemberId === oldRepayment.receiverId
+    )?.amountCents ?? 0;
+  const maximumCorrectedAmount = remaining + oldRepayment.amountCents;
+  if (amountCents > maximumCorrectedAmount) {
+    return [
+      "更正後的還款金額超過這組成員原本可償還的金額。",
+      `可更正上限：${formatCents(maximumCorrectedAmount)}`,
+      `本次輸入：${formatCents(amountCents)}`
+    ].join("\n");
+  }
+
+  const created = await createRepaymentInGroup({
+    groupId: group.groupId,
+    amount: parsed.amount,
+    payerId: payer.member.memberId,
+    receiverId: receiver.member.memberId
+  });
+  const newCloudResult = await syncTravelRepaymentReliably({
+    localEntryId: created.repayment.id,
+    chatId,
+    actorLineUserId: lineUserId,
+    payerName: payer.member.displayName,
+    receiverName: receiver.member.displayName,
+    amountCents: created.repayment.amountCents,
+    occurredAt: created.repayment.createdAt.toISOString()
+  });
+
+  await db.repayment.delete({ where: { id: oldRepayment.id } });
+  const voidResult = await syncTravelExpenseVoidReliably({
+    localEntryId: oldRepayment.id,
+    entryKind: "repayment",
+    chatId,
+    actorLineUserId: lineUserId,
+    reason: `Corrected by LINE repayment ${created.repayment.id}`,
+    waitForRepaymentLocalEntryId: created.repayment.id
+  });
+  await clearPendingAction({
+    chatId,
+    requesterLineUserId: lineUserId,
+    actionType: PendingActionType.awaiting_expense_details
+  });
+
+  const notices = [
+    newCloudResult.status === "warning" ? newCloudResult.message : undefined,
+    voidResult.status === "warning" ? voidResult.message : undefined
+  ].filter((notice): notice is string => Boolean(notice));
+  const afterSnapshot = await getSettlementSnapshot(group.groupId);
+
+  return [
+    "已完成還款更正：",
+    `原紀錄：${payer.member.displayName} → ${receiver.member.displayName} ${formatCents(oldRepayment.amountCents)}（已作廢）`,
+    `新紀錄：${payer.member.displayName} → ${receiver.member.displayName} ${formatCents(amountCents)}`,
+    ...(notices.length > 0
+      ? ["", "旅遊小本本同步提醒：", ...new Set(notices)]
+      : []),
+    "",
+    buildSettlementText(buildSettlementLines(afterSnapshot))
+  ].join("\n");
+}
+
 async function handleRecentExpenses(event: LineMessageEvent) {
   const group = await getGroupIdOrReply(event);
 
@@ -2029,7 +2276,7 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
         requesterLineUserId: lineUserId,
         actionType: PendingActionType.awaiting_expense_details
       });
-      return "已取消更正支出。";
+      return "已取消更正操作。";
     }
 
     const payload =
@@ -2052,6 +2299,32 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
         event,
         rawText,
         correctionPendingState.pending.targetLedgerId
+      );
+    }
+
+    if (
+      stage === "select-repayment-to-correct" &&
+      correctionPendingState.pending.targetLedgerId &&
+      /^\d+$/u.test(rawText)
+    ) {
+      return handleCorrectRepaymentSelection(
+        event,
+        rawText,
+        correctionPendingState.pending.targetLedgerId
+      );
+    }
+
+    if (
+      stage === "enter-corrected-repayment" &&
+      correctionPendingState.pending.targetLedgerId &&
+      correctionPendingState.pending.targetExpenseId &&
+      (parsed.kind === "repayment" || parsed.kind === "ignored")
+    ) {
+      return handleCorrectRepaymentDetails(
+        event,
+        rawText,
+        correctionPendingState.pending.targetLedgerId,
+        correctionPendingState.pending.targetExpenseId
       );
     }
 
@@ -2078,7 +2351,7 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
         requesterLineUserId: lineUserId,
         actionType: PendingActionType.awaiting_expense_details
       });
-      return "更正操作已失效，請重新輸入「更正支出」。";
+      return "更正操作已失效，請重新輸入「更正支出」或「更正還款」。";
     }
   }
 
@@ -2289,6 +2562,9 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
 
     case "correct-expense":
       return handleCorrectExpensePrompt(event);
+
+    case "correct-repayment":
+      return handleCorrectRepaymentPrompt(event);
 
     case "ignored":
       if (looksLikeExpenseInput(rawText)) {

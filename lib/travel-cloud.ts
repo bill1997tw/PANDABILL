@@ -263,11 +263,12 @@ export type TravelRepaymentSyncInput = {
 
 export type TravelExpenseVoidSyncInput = {
   localEntryId: string;
-  entryKind: "expense" | "borrowing";
+  entryKind: "expense" | "borrowing" | "repayment";
   chatId: string;
   actorLineUserId: string;
   reason?: string;
   waitForExpenseLocalEntryId?: string;
+  waitForRepaymentLocalEntryId?: string;
 };
 
 export async function syncTravelExpenseVoid(
@@ -287,6 +288,22 @@ export async function syncTravelExpenseVoid(
           status: "warning",
           message:
             "新支出仍在等待旅遊小本本同步；舊紀錄會在新支出同步成功後自動作廢。"
+        };
+      }
+    }
+    if (input.waitForRepaymentLocalEntryId) {
+      const dependency = await db.travelCloudSyncJob.findFirst({
+        where: {
+          entryType: "repayment",
+          localEntryId: input.waitForRepaymentLocalEntryId
+        },
+        select: { id: true }
+      });
+      if (dependency) {
+        return {
+          status: "warning",
+          message:
+            "新還款仍在等待旅遊小本本同步；舊紀錄會在新還款同步成功後自動作廢。"
         };
       }
     }
