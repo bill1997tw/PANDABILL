@@ -86,7 +86,9 @@ import type {
 } from "@/lib/line/types";
 import {
   getTravelPairingErrorMessage,
+  parseTravelMemberLinkCommand,
   parseTravelPairingCommand,
+  redeemTravelMemberLink,
   redeemTravelPairing
 } from "@/lib/travel-cloud";
 
@@ -1672,6 +1674,24 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
       ].join("\n");
     } catch (error) {
       console.error("Travel journal pairing failed", { chatType, error });
+      return getTravelPairingErrorMessage(error);
+    }
+  }
+
+  const travelMemberLinkCode = parseTravelMemberLinkCommand(rawText);
+  if (travelMemberLinkCode) {
+    if (!lineUserId) {
+      return "LINE 沒有提供你的使用者識別，暫時無法連結旅程成員。";
+    }
+    try {
+      await redeemTravelMemberLink({
+        pairingCode: travelMemberLinkCode,
+        chatId,
+        lineUserId
+      });
+      return "已完成你的 LINE 身分與旅遊小本本成員連結。";
+    } catch (error) {
+      console.error("Travel journal member linking failed", { chatType, error });
       return getTravelPairingErrorMessage(error);
     }
   }

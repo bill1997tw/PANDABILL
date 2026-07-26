@@ -22,8 +22,19 @@ export function parseTravelPairingCommand(text: string) {
   return match?.[1].toUpperCase() ?? null;
 }
 
+export function parseTravelMemberLinkCommand(text: string) {
+  const match = text.trim().match(
+    /^連結成員\s+([0-9a-f]{4}(?:-[0-9a-f]{4}){3})$/iu
+  );
+  return match?.[1].toUpperCase() ?? null;
+}
+
 export function createLineChatKey(chatId: string, secret: string) {
   return createHmac("sha256", secret).update(chatId, "utf8").digest("hex");
+}
+
+export function createLineUserKey(lineUserId: string, secret: string) {
+  return createHmac("sha256", secret).update(lineUserId, "utf8").digest("hex");
 }
 
 async function callRpc<T>(
@@ -63,6 +74,19 @@ export async function redeemTravelPairing(input: {
   });
 }
 
+export async function redeemTravelMemberLink(input: {
+  pairingCode: string;
+  chatId: string;
+  lineUserId: string;
+}) {
+  const { hmacSecret } = getConfig();
+  return callRpc("redeem_line_trip_member_claim", {
+    pairing_code: input.pairingCode,
+    target_line_chat_key: createLineChatKey(input.chatId, hmacSecret),
+    target_line_user_key: createLineUserKey(input.lineUserId, hmacSecret)
+  });
+}
+
 export function getTravelPairingErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   if (message === "travel_cloud_not_configured") {
@@ -73,6 +97,12 @@ export function getTravelPairingErrorMessage(error: unknown) {
   }
   if (message === "invalid_pairing_code") {
     return "配對碼格式不正確，請直接複製旅遊小本本顯示的完整指令。";
+  }
+  if (message === "line_member_claim_unavailable") {
+    return "這組成員身分碼已過期、已使用或已取消，請回旅遊小本本重新產生。";
+  }
+  if (message === "wrong_line_group_for_trip") {
+    return "這組成員身分碼必須貼在該旅程已綁定的小二 LINE 群組中。";
   }
   if (message.includes("duplicate key")) {
     return "這個 LINE 群組或旅程已經綁定；請先在旅遊小本本解除舊綁定。";
