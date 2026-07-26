@@ -86,7 +86,8 @@ function toTwdMinorUnits(amountCents: number, allowZero = false) {
   if (!Number.isSafeInteger(amountCents) || invalidSign || amountCents % 100 !== 0) {
     throw new Error("travel_cloud_fractional_twd_unsupported");
   }
-  return amountCents / 100;
+  // Both the LINE ledger and cloud ledger use minor units (cents).
+  return amountCents;
 }
 
 async function getBoundTripId(chatId: string, secret: string) {
