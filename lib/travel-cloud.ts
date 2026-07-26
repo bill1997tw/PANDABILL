@@ -151,13 +151,31 @@ export type TravelExpenseSyncInput = {
   title: string;
   amountCents: number;
   occurredAt: string;
-  payerLineUserId: string;
-  shares: Array<{ lineUserId: string; shareCents: number }>;
+  payerName?: string;
+  payerLineUserId?: string;
+  shares: Array<{
+    memberName?: string;
+    lineUserId?: string;
+    shareCents: number;
+  }>;
   borrowing?: {
-    borrowerLineUserId: string;
-    lenderLineUserId: string;
+    borrowerName?: string;
+    borrowerLineUserId?: string;
+    lenderName?: string;
+    lenderLineUserId?: string;
   };
 };
+
+function participantReference(
+  memberName: string | undefined,
+  lineUserId: string | undefined,
+  hmacSecret: string
+) {
+  const normalizedName = memberName?.trim();
+  if (normalizedName) return normalizedName;
+  if (lineUserId) return createLineUserKey(lineUserId, hmacSecret);
+  throw new Error("travel_cloud_participant_reference_required");
+}
 
 export async function syncTravelExpense(
   input: TravelExpenseSyncInput
@@ -180,11 +198,13 @@ export async function syncTravelExpense(
         ...common,
         borrowing_amount_minor: toTwdMinorUnits(input.amountCents),
         borrowing_currency: "TWD",
-        borrowing_borrower_line_user_key: createLineUserKey(
+        borrowing_borrower_line_user_key: participantReference(
+          input.borrowing.borrowerName,
           input.borrowing.borrowerLineUserId,
           hmacSecret
         ),
-        borrowing_lender_line_user_key: createLineUserKey(
+        borrowing_lender_line_user_key: participantReference(
+          input.borrowing.lenderName,
           input.borrowing.lenderLineUserId,
           hmacSecret
         ),
@@ -196,12 +216,17 @@ export async function syncTravelExpense(
         expense_title: input.title,
         expense_amount_minor: toTwdMinorUnits(input.amountCents),
         expense_currency: "TWD",
-        expense_payer_line_user_key: createLineUserKey(
+        expense_payer_line_user_key: participantReference(
+          input.payerName,
           input.payerLineUserId,
           hmacSecret
         ),
         expense_shares: input.shares.map((share) => ({
-          line_user_key: createLineUserKey(share.lineUserId, hmacSecret),
+          line_user_key: participantReference(
+            share.memberName,
+            share.lineUserId,
+            hmacSecret
+          ),
           amount_minor: toTwdMinorUnits(share.shareCents, true)
         })),
         expense_occurred_at: input.occurredAt
@@ -213,7 +238,7 @@ export async function syncTravelExpense(
     if (/line_(?:payer|participant|transfer_member)_not_linked/u.test(message)) {
       return {
         status: "warning",
-        message: "小二已記帳，但有成員尚未連結旅遊小本本 LINE 身分，所以雲端尚未同步。"
+        message: "小二已記帳，但旅遊小本本的活動名單中找不到相關成員，所以雲端尚未同步。"
       };
     }
     return {
@@ -227,8 +252,10 @@ export type TravelRepaymentSyncInput = {
   localEntryId: string;
   chatId: string;
   actorLineUserId: string;
-  payerLineUserId: string;
-  receiverLineUserId: string;
+  payerName?: string;
+  payerLineUserId?: string;
+  receiverName?: string;
+  receiverLineUserId?: string;
   amountCents: number;
   occurredAt: string;
 };
@@ -247,8 +274,13 @@ export async function syncTravelRepayment(
       bridge_entry_id: stableBridgeEntryId("repayment", input.localEntryId),
       repayment_amount_minor: toTwdMinorUnits(input.amountCents),
       repayment_currency: "TWD",
-      repayment_payer_line_user_key: createLineUserKey(input.payerLineUserId, hmacSecret),
-      repayment_receiver_line_user_key: createLineUserKey(
+      repayment_payer_line_user_key: participantReference(
+        input.payerName,
+        input.payerLineUserId,
+        hmacSecret
+      ),
+      repayment_receiver_line_user_key: participantReference(
+        input.receiverName,
         input.receiverLineUserId,
         hmacSecret
       ),
@@ -260,7 +292,7 @@ export async function syncTravelRepayment(
     return {
       status: "warning",
       message: /line_transfer_member_not_linked/u.test(message)
-        ? "小二已記錄還款，但付款人或收款人尚未連結旅遊小本本 LINE 身分。"
+        ? "小二已記錄還款，但旅遊小本本的活動名單中找不到付款人或收款人。"
         : "小二已記錄還款，但旅遊小本本同步暫時失敗；相同紀錄 ID 不會重複寫入。"
     };
   }

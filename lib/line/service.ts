@@ -1052,14 +1052,11 @@ async function createParsedExpense(input: {
       (candidate) => candidate.memberId === participant.member.id
     )
   );
-  const payerLineUserId = resolved.payer.lineUserId;
-
   if (
     resolved.lineUserId &&
-    payerLineUserId &&
     participantRefs.every(
       (participant): participant is ParticipantRef =>
-        Boolean(participant?.lineUserId)
+        Boolean(participant)
     )
   ) {
     const cloudResult = await syncTravelExpenseReliably({
@@ -1069,15 +1066,15 @@ async function createParsedExpense(input: {
       title: created.expense.title,
       amountCents: created.expense.amountCents,
       occurredAt: created.expense.createdAt,
-      payerLineUserId,
+      payerName: resolved.payer.displayName,
       shares: created.expense.participants.map((participant, index) => ({
-        lineUserId: participantRefs[index]!.lineUserId!,
+        memberName: participantRefs[index]!.displayName,
         shareCents: participant.shareCents
       })),
       borrowing: input.parsed.isBorrowing
         ? {
-            borrowerLineUserId: participantRefs[0]!.lineUserId!,
-            lenderLineUserId: payerLineUserId
+            borrowerName: participantRefs[0]!.displayName,
+            lenderName: resolved.payer.displayName
           }
         : undefined
     });
@@ -1086,7 +1083,7 @@ async function createParsedExpense(input: {
     }
   } else if (resolved.lineUserId) {
     cloudSyncNotice =
-      "小二已記帳，但有成員尚未建立可驗證的 LINE 身分，所以旅遊小本本尚未同步。";
+      "小二已記帳，但本機帳本成員與目前活動名單不一致，所以旅遊小本本尚未同步。";
   }
 
   return {
@@ -1311,23 +1308,20 @@ async function handleRepaymentInput(event: LineMessageEvent, text: string) {
   });
 
   let cloudSyncNotice: string | undefined;
-  if (lineUserId && payer.member.lineUserId && receiver.member.lineUserId) {
+  if (lineUserId) {
     const { chatId } = getChatContext(event.source);
     const cloudResult = await syncTravelRepaymentReliably({
       localEntryId: createdRepayment.repayment.id,
       chatId,
       actorLineUserId: lineUserId,
-      payerLineUserId: payer.member.lineUserId,
-      receiverLineUserId: receiver.member.lineUserId,
+      payerName: payer.member.displayName,
+      receiverName: receiver.member.displayName,
       amountCents: createdRepayment.repayment.amountCents,
       occurredAt: createdRepayment.repayment.createdAt.toISOString()
     });
     if (cloudResult.status === "warning") {
       cloudSyncNotice = cloudResult.message;
     }
-  } else if (lineUserId) {
-    cloudSyncNotice =
-      "小二已記錄還款，但相關成員尚未建立可驗證的 LINE 身分，旅遊小本本尚未同步。";
   }
 
   const remainingCents = outstanding.amountCents - amountCents;
