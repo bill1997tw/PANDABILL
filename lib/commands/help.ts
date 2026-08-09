@@ -25,7 +25,8 @@ export function getSettlementMenuText() {
     "1. 查看目前結算",
     "2. 帳本結算",
     "3. 代墊 MVP",
-    "4. 結束活動並封存帳本"
+    "4. 結束活動並封存帳本",
+    "5. 查看帳本"
   ].join("\n");
 }
 

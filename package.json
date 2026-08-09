@@ -10,7 +10,7 @@
     "build": "prisma generate && next build",
     "build:production": "prisma migrate deploy && prisma generate && next build",
     "start": "next start",
-    "test": "node --experimental-strip-types --test tests/ledger-list.test.ts",
+    "test": "node --experimental-strip-types --test tests/ledger-list.test.ts tests/settlement-menu.test.ts",
     "lint": "next lint",
     "postinstall": "prisma generate",
     "prisma:generate": "prisma generate",

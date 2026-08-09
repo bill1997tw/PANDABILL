@@ -37,9 +37,13 @@ import {
   createPendingAction,
   getPendingActionState
 } from "@/lib/commands/pending";
+import { resolveSettlementShortcut } from "@/lib/commands/menu-shortcuts";
 import { getMvpText, getSettlementSummaryText } from "@/lib/commands/settlement";
 import { formatCents, parseAmountToCents } from "@/lib/currency";
-import { formatLedgerListItem } from "@/lib/ledger-list";
+import {
+  formatLedgerListItem,
+  getConfirmedParticipantCount
+} from "@/lib/ledger-list";
 import { db } from "@/lib/db";
 import { isDatabaseError } from "@/lib/db-error";
 import {
@@ -278,21 +282,7 @@ async function resolveShortcutCommand(
   }
 
   if (menuMode === "settlement") {
-    if (number === 1) {
-      return { kind: "current-settlement" };
-    }
-
-    if (number === 2) {
-      return { kind: "ledger-settlement" };
-    }
-
-    if (number === 3) {
-      return { kind: "mvp" };
-    }
-
-    if (number === 4) {
-      return { kind: "archive-ledger" };
-    }
+    return resolveSettlementShortcut(number);
   }
 
   return { kind: "ignored" };
@@ -619,7 +609,8 @@ async function handleListLedgers(event: LineMessageEvent) {
           name: ledger.name,
           status: getLedgerStatusText(ledger),
           expenseCount: ledger.expenseCount,
-          totalExpenseCents: ledger.totalExpenseCents
+          totalExpenseCents: ledger.totalExpenseCents,
+          confirmedParticipantCount: getConfirmedParticipantCount(ledger)
         })}`
     ),
     "",
