@@ -1,6 +1,7 @@
 import { LedgerStatus, Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { indexLedgerExpenseTotals } from "@/lib/ledger-list";
 import { assertNonEmptyString } from "@/lib/validators";
 
 export type LedgerWithCounts = {
@@ -18,6 +19,10 @@ export type LedgerWithCounts = {
   updatedAt: Date;
   expenseCount: number;
   participantCount: number;
+};
+
+export type LedgerListItem = LedgerWithCounts & {
+  totalExpenseCents: number;
 };
 
 type ActiveLedgerParticipantWithMember = Prisma.LedgerParticipantGetPayload<{
@@ -237,6 +242,34 @@ export async function listLedgers(groupId: string) {
   });
 
   return ledgers.map(mapLedger);
+}
+
+export async function listLedgersWithTotals(
+  groupId: string
+): Promise<LedgerListItem[]> {
+  const ledgers = await listLedgers(groupId);
+
+  if (ledgers.length === 0) {
+    return [];
+  }
+
+  const expenses = await db.expense.findMany({
+    where: {
+      ledgerId: {
+        in: ledgers.map((ledger) => ledger.id)
+      }
+    },
+    select: {
+      ledgerId: true,
+      amountCents: true
+    }
+  });
+  const totalByLedgerId = indexLedgerExpenseTotals(expenses);
+
+  return ledgers.map((ledger) => ({
+    ...ledger,
+    totalExpenseCents: totalByLedgerId.get(ledger.id) ?? 0
+  }));
 }
 
 export async function getActiveLedgerParticipants(groupId: string) {

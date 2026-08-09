@@ -39,6 +39,7 @@ import {
 } from "@/lib/commands/pending";
 import { getMvpText, getSettlementSummaryText } from "@/lib/commands/settlement";
 import { formatCents, parseAmountToCents } from "@/lib/currency";
+import { formatLedgerListItem } from "@/lib/ledger-list";
 import { db } from "@/lib/db";
 import { isDatabaseError } from "@/lib/db-error";
 import {
@@ -63,6 +64,7 @@ import {
   joinCollectingLedger,
   leaveCollectingLedger,
   listLedgers,
+  listLedgersWithTotals,
   removeMemberFromCollectingLedger,
   switchActiveLedger
 } from "@/lib/ledger-service";
@@ -602,7 +604,7 @@ async function handleListLedgers(event: LineMessageEvent) {
     return group.reply;
   }
 
-  const ledgers = await listLedgers(group.groupId);
+  const ledgers = await listLedgersWithTotals(group.groupId);
 
   if (ledgers.length === 0) {
     return "目前尚未建立任何活動。\n請輸入：建立活動 活動名稱";
@@ -613,7 +615,12 @@ async function handleListLedgers(event: LineMessageEvent) {
     "",
     ...ledgers.map(
       (ledger, index) =>
-        `${index + 1}. ${ledger.name}｜${getLedgerStatusText(ledger)}｜${ledger.expenseCount} 筆支出`
+        `${index + 1}. ${formatLedgerListItem({
+          name: ledger.name,
+          status: getLedgerStatusText(ledger),
+          expenseCount: ledger.expenseCount,
+          totalExpenseCents: ledger.totalExpenseCents
+        })}`
     ),
     "",
     "可輸入：切換活動 活動名稱",
