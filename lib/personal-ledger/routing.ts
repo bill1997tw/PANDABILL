@@ -9,3 +9,7 @@ export function shouldRoutePersonalExpense(input: {
     input.hasActiveLedger
   );
 }
+
+export function shouldTreatAsPersonalLedgerNameInput(command: { kind: string }) {
+  return command.kind === "ignored" || command.kind === "shortcut";
+}

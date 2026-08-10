@@ -43,6 +43,7 @@ import {
   getPendingActionState
 } from "@/lib/commands/pending";
 import {
+  resolvePersonalAccountingNumericCommand,
   resolvePersonalAccountingShortcut,
   resolveSettlementShortcut
 } from "@/lib/commands/menu-shortcuts";
@@ -113,7 +114,10 @@ import {
   setPersonalLedgerPendingAction
 } from "@/lib/personal-ledger/pending";
 import { personalLedgerService } from "@/lib/personal-ledger/service";
-import { shouldRoutePersonalExpense } from "@/lib/personal-ledger/routing";
+import {
+  shouldRoutePersonalExpense,
+  shouldTreatAsPersonalLedgerNameInput
+} from "@/lib/personal-ledger/routing";
 import { parseLineCommand } from "@/lib/line/parser";
 import { getLineDisplayName } from "@/lib/line/profile";
 import type { LineTextReplyPayload } from "@/lib/line/client";
@@ -516,7 +520,7 @@ async function handlePersonalLedgerPendingResponse(
       return "已取消開始記帳。";
     }
 
-    if (parsed.kind !== "ignored") {
+    if (!shouldTreatAsPersonalLedgerNameInput(parsed)) {
       await clearPersonalLedgerPendingAction(chatId, lineUserId);
       return null;
     }
@@ -2461,6 +2465,20 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
     }
 
     parsed = await resolveContextualPersonalCommand(event, rawText, parsed);
+
+    if (parsed.kind === "shortcut") {
+      const context = await getActiveMenuContext(chatId, lineUserId);
+      const personalNumericCommand = resolvePersonalAccountingNumericCommand({
+        chatType,
+        menuMode: resolveMenuModeFromContext(context),
+        command: parsed,
+        hasPersonalPendingAction: false
+      });
+
+      if (personalNumericCommand) {
+        parsed = personalNumericCommand;
+      }
+    }
 
     if (isPersonalLedgerCommand(parsed)) {
       return handlePersonalLedgerCommand(event, parsed);

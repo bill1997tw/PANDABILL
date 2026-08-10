@@ -49,3 +49,23 @@ export function resolvePersonalAccountingShortcut(number: number) {
 
   return { kind: "ignored" } as const;
 }
+
+export function resolvePersonalAccountingNumericCommand(input: {
+  chatType: "user" | "group" | "room";
+  menuMode: "xiaoer" | "settlement" | "personal-accounting" | null;
+  command: { kind: string; number?: number };
+  hasPersonalPendingAction: boolean;
+}) {
+  if (
+    input.hasPersonalPendingAction ||
+    input.chatType !== "user" ||
+    input.menuMode !== "personal-accounting" ||
+    input.command.kind !== "shortcut" ||
+    input.command.number === undefined
+  ) {
+    return null;
+  }
+
+  const resolved = resolvePersonalAccountingShortcut(input.command.number);
+  return resolved.kind === "ignored" ? null : resolved;
+}

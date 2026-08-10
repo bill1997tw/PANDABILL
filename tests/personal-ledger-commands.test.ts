@@ -3,7 +3,11 @@ import test from "node:test";
 
 import { getPersonalAccountingMenuText } from "../lib/personal-ledger/formatter.ts";
 import { parseLineCommand } from "../lib/line/parser.ts";
-import { resolvePersonalAccountingShortcut } from "../lib/commands/menu-shortcuts.ts";
+import {
+  resolvePersonalAccountingNumericCommand,
+  resolvePersonalAccountingShortcut
+} from "../lib/commands/menu-shortcuts.ts";
+import { shouldTreatAsPersonalLedgerNameInput } from "../lib/personal-ledger/routing.ts";
 
 const expectedMenu = [
   "大人要記點花費嗎？小二替您記著～",
@@ -44,6 +48,62 @@ test("personal accounting shortcuts stay in their own menu context", () => {
   assert.deepEqual(resolvePersonalAccountingShortcut(6), {
     kind: "personal-ledger-history"
   });
+});
+
+test("personal accounting context claims numeric options before legacy routing", () => {
+  const expectedKinds = [
+    "personal-ledger-start",
+    "personal-ledger-current",
+    "personal-ledger-details",
+    "personal-ledger-delete-last",
+    "personal-ledger-end",
+    "personal-ledger-history"
+  ];
+
+  for (const [index, expectedKind] of expectedKinds.entries()) {
+    const number = index + 1;
+    const command = { kind: "shortcut", number } as const;
+    const resolved = resolvePersonalAccountingNumericCommand({
+      chatType: "user",
+      menuMode: "personal-accounting",
+      command,
+      hasPersonalPendingAction: false
+    });
+
+    assert.equal(resolved?.kind, expectedKind, `personal option ${number}`);
+    assert.notEqual(resolved?.kind, "start-payment-setup");
+  }
+});
+
+test("personal pending actions retain priority over personal numeric shortcuts", () => {
+  const command = { kind: "shortcut", number: 1 } as const;
+
+  assert.equal(
+    resolvePersonalAccountingNumericCommand({
+      chatType: "user",
+      menuMode: "personal-accounting",
+      command,
+      hasPersonalPendingAction: true
+    }),
+    null
+  );
+  assert.equal(shouldTreatAsPersonalLedgerNameInput(command), true);
+});
+
+test("legacy numeric routing remains available outside personal context", () => {
+  const command = { kind: "shortcut", number: 1 } as const;
+
+  for (const menuMode of [null, "xiaoer", "settlement"] as const) {
+    assert.equal(
+      resolvePersonalAccountingNumericCommand({
+        chatType: "user",
+        menuMode,
+        command,
+        hasPersonalPendingAction: false
+      }),
+      null
+    );
+  }
 });
 
 test("explicit lifecycle commands route to personal accounting", () => {
