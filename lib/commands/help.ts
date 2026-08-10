@@ -1,4 +1,4 @@
-export type MenuMode = "xiaoer" | "settlement";
+export type MenuMode = "xiaoer" | "settlement" | "personal-accounting";
 
 export function getXiaoerMenuText() {
   return [

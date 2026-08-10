@@ -29,6 +29,17 @@ enum PendingActionType {
 enum MenuContextType {
   xiaoer
   settlement
+  personal_accounting
+}
+
+enum PersonalLedgerStatus {
+  active
+  ended
+}
+
+enum PersonalLedgerPendingActionType {
+  awaiting_name
+  awaiting_end_confirmation
 }
 
 model Group {
@@ -126,6 +137,52 @@ model LineUserProfile {
   updatedAt          DateTime @updatedAt
 
   @@index([memberName])
+}
+
+model PersonalLedger {
+  id             String                       @id @default(cuid())
+  lineUserId     String
+  name           String
+  status         PersonalLedgerStatus         @default(active)
+  createdAt      DateTime                     @default(now())
+  updatedAt      DateTime                     @updatedAt
+  endedAt        DateTime?
+  expenses       PersonalExpense[]
+  pendingActions PersonalLedgerPendingAction[]
+
+  @@index([lineUserId, status, createdAt])
+  @@index([lineUserId, createdAt])
+}
+
+model PersonalExpense {
+  id          String         @id @default(cuid())
+  ledgerId    String
+  lineUserId  String
+  item        String
+  amountCents Int
+  category    String?
+  note        String?
+  spentAt     DateTime       @default(now())
+  createdAt   DateTime       @default(now())
+  ledger      PersonalLedger @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+
+  @@index([ledgerId, createdAt])
+  @@index([lineUserId, createdAt])
+}
+
+model PersonalLedgerPendingAction {
+  id           String                          @id @default(cuid())
+  chatId       String
+  lineUserId   String
+  actionType   PersonalLedgerPendingActionType
+  targetLedgerId String?
+  expiresAt    DateTime
+  createdAt    DateTime                        @default(now())
+  updatedAt    DateTime                        @updatedAt
+  targetLedger PersonalLedger?                 @relation(fields: [targetLedgerId], references: [id], onDelete: Cascade)
+
+  @@unique([chatId, lineUserId])
+  @@index([lineUserId, expiresAt])
 }
 
 model Expense {

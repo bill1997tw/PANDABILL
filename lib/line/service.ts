@@ -1,4 +1,8 @@
-import { PendingActionType, Prisma } from "@prisma/client";
+import {
+  PendingActionType,
+  PersonalLedgerPendingActionType,
+  Prisma
+} from "@prisma/client";
 
 import {
   formatPaymentSummary,
@@ -27,6 +31,7 @@ import {
   getXiaoerMenuText
 } from "@/lib/commands/help";
 import {
+  clearMenuContext,
   getActiveMenuContext,
   getMenuContextExpiredPrompt,
   rememberMenuContext,
@@ -37,7 +42,10 @@ import {
   createPendingAction,
   getPendingActionState
 } from "@/lib/commands/pending";
-import { resolveSettlementShortcut } from "@/lib/commands/menu-shortcuts";
+import {
+  resolvePersonalAccountingShortcut,
+  resolveSettlementShortcut
+} from "@/lib/commands/menu-shortcuts";
 import { getMvpText, getSettlementSummaryText } from "@/lib/commands/settlement";
 import { formatCents, parseAmountToCents } from "@/lib/currency";
 import {
@@ -81,6 +89,31 @@ import {
   type PaymentSetupStep,
   updateLineUserProfileDraft
 } from "@/lib/line-user-profile";
+import {
+  formatCurrentPersonalLedger,
+  formatPersonalExpenseDeleted,
+  formatPersonalExpenseDetails,
+  formatPersonalLedgerAlreadyActive,
+  formatPersonalLedgerEnded,
+  formatPersonalLedgerEndPrompt,
+  formatPersonalLedgerHistory,
+  formatPersonalLedgerStarted,
+  formatPersonalExpenseRecorded,
+  formatPersonalExpenseValidationError,
+  getNoActivePersonalLedgerText,
+  getNoPersonalExpenseToDeleteText,
+  getPersonalAccountingMenuText,
+  getPersonalExpenseSaveError,
+  getPersonalLedgerNamePrompt
+} from "@/lib/personal-ledger/formatter";
+import { parsePersonalExpenseMessage } from "@/lib/personal-ledger/expense-parser";
+import {
+  clearPersonalLedgerPendingAction,
+  getPersonalLedgerPendingAction,
+  setPersonalLedgerPendingAction
+} from "@/lib/personal-ledger/pending";
+import { personalLedgerService } from "@/lib/personal-ledger/service";
+import { shouldRoutePersonalExpense } from "@/lib/personal-ledger/routing";
 import { parseLineCommand } from "@/lib/line/parser";
 import { getLineDisplayName } from "@/lib/line/profile";
 import type { LineTextReplyPayload } from "@/lib/line/client";
@@ -213,7 +246,10 @@ async function getGroupIdOrReply(event: LineMessageEvent) {
   };
 }
 
-async function showMenu(event: LineMessageEvent, mode: "xiaoer" | "settlement") {
+async function showMenu(
+  event: LineMessageEvent,
+  mode: "xiaoer" | "settlement" | "personal-accounting"
+) {
   const { chatId, chatType, lineUserId } = getChatContext(event.source);
   const binding = chatType === "user" ? null : await getOrCreateGroupContext(event.source);
 
@@ -224,7 +260,13 @@ async function showMenu(event: LineMessageEvent, mode: "xiaoer" | "settlement") 
     mode
   });
 
-  return mode === "xiaoer" ? getXiaoerMenuText() : getSettlementMenuText();
+  if (mode === "xiaoer") {
+    return getXiaoerMenuText();
+  }
+
+  return mode === "settlement"
+    ? getSettlementMenuText()
+    : getPersonalAccountingMenuText();
 }
 
 async function resolveShortcutCommand(
@@ -285,7 +327,284 @@ async function resolveShortcutCommand(
     return resolveSettlementShortcut(number);
   }
 
+  if (menuMode === "personal-accounting") {
+    return resolvePersonalAccountingShortcut(number);
+  }
+
   return { kind: "ignored" };
+}
+
+function isPersonalLedgerCommand(command: ParsedLineCommand) {
+  return command.kind.startsWith("personal-ledger-");
+}
+
+async function refreshPersonalAccountingContext(event: LineMessageEvent) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  await rememberMenuContext({
+    chatId,
+    lineUserId,
+    mode: "personal-accounting"
+  });
+}
+
+async function resolveContextualPersonalCommand(
+  event: LineMessageEvent,
+  rawText: string,
+  parsed: ParsedLineCommand
+): Promise<ParsedLineCommand> {
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
+  if (
+    chatType !== "user" ||
+    !lineUserId ||
+    (rawText !== "查看明細" && rawText !== "刪除上一筆")
+  ) {
+    return parsed;
+  }
+
+  const context = await getActiveMenuContext(chatId, lineUserId);
+  if (resolveMenuModeFromContext(context) !== "personal-accounting") {
+    return parsed;
+  }
+
+  return rawText === "查看明細"
+    ? { kind: "personal-ledger-details" }
+    : { kind: "personal-ledger-delete-last" };
+}
+
+async function handlePersonalLedgerDetails(event: LineMessageEvent) {
+  const { lineUserId } = getChatContext(event.source);
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  await refreshPersonalAccountingContext(event);
+  const result = await personalLedgerService.getDetails(lineUserId);
+  return result.status === "found"
+    ? formatPersonalExpenseDetails(result.details)
+    : getNoActivePersonalLedgerText();
+}
+
+async function handlePersonalLedgerDeleteLatest(event: LineMessageEvent) {
+  const { lineUserId } = getChatContext(event.source);
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  await refreshPersonalAccountingContext(event);
+  const result = await personalLedgerService.deleteLatestExpense(lineUserId);
+  if (result.status === "no-active") {
+    return getNoActivePersonalLedgerText();
+  }
+
+  return result.status === "deleted"
+    ? formatPersonalExpenseDeleted(result.result)
+    : getNoPersonalExpenseToDeleteText();
+}
+
+async function handlePersonalLedgerStartPrompt(event: LineMessageEvent) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  await refreshPersonalAccountingContext(event);
+
+  const active = await personalLedgerService.getCurrent(lineUserId);
+  if (active) {
+    return formatPersonalLedgerAlreadyActive(active);
+  }
+
+  await setPersonalLedgerPendingAction({
+    chatId,
+    lineUserId,
+    actionType: PersonalLedgerPendingActionType.awaiting_name
+  });
+  return getPersonalLedgerNamePrompt();
+}
+
+async function handlePersonalLedgerCurrent(event: LineMessageEvent) {
+  const { lineUserId } = getChatContext(event.source);
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  await refreshPersonalAccountingContext(event);
+
+  const active = await personalLedgerService.getCurrentSummary(lineUserId);
+  return active
+    ? formatCurrentPersonalLedger(active)
+    : getNoActivePersonalLedgerText();
+}
+
+async function handlePersonalLedgerEndPrompt(event: LineMessageEvent) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  await refreshPersonalAccountingContext(event);
+
+  const active = await personalLedgerService.getCurrent(lineUserId);
+  if (!active) {
+    return getNoActivePersonalLedgerText();
+  }
+
+  await setPersonalLedgerPendingAction({
+    chatId,
+    lineUserId,
+    actionType: PersonalLedgerPendingActionType.awaiting_end_confirmation,
+    targetLedgerId: active.id
+  });
+  return formatPersonalLedgerEndPrompt(active);
+}
+
+async function handlePersonalLedgerHistory(event: LineMessageEvent) {
+  const { lineUserId } = getChatContext(event.source);
+  if (!lineUserId) {
+    return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
+  }
+
+  await refreshPersonalAccountingContext(event);
+
+  const ledgers = await personalLedgerService.listHistory(lineUserId);
+  return formatPersonalLedgerHistory(ledgers);
+}
+
+async function handlePersonalLedgerCommand(
+  event: LineMessageEvent,
+  command: ParsedLineCommand
+) {
+  switch (command.kind) {
+    case "personal-ledger-menu":
+      return showMenu(event, "personal-accounting");
+    case "personal-ledger-start":
+      return handlePersonalLedgerStartPrompt(event);
+    case "personal-ledger-current":
+      return handlePersonalLedgerCurrent(event);
+    case "personal-ledger-details":
+      return handlePersonalLedgerDetails(event);
+    case "personal-ledger-delete-last":
+      return handlePersonalLedgerDeleteLatest(event);
+    case "personal-ledger-end":
+      return handlePersonalLedgerEndPrompt(event);
+    case "personal-ledger-history":
+      return handlePersonalLedgerHistory(event);
+    default:
+      return null;
+  }
+}
+
+async function handlePersonalLedgerPendingResponse(
+  event: LineMessageEvent,
+  rawText: string,
+  parsed: ParsedLineCommand
+) {
+  const { chatId, lineUserId } = getChatContext(event.source);
+  if (!lineUserId) {
+    return null;
+  }
+
+  const pending = await getPersonalLedgerPendingAction(chatId, lineUserId);
+  if (!pending) {
+    return null;
+  }
+
+  if (pending.actionType === PersonalLedgerPendingActionType.awaiting_name) {
+    if (parsed.kind === "cancel") {
+      await clearPersonalLedgerPendingAction(chatId, lineUserId);
+      return "已取消開始記帳。";
+    }
+
+    if (parsed.kind !== "ignored") {
+      await clearPersonalLedgerPendingAction(chatId, lineUserId);
+      return null;
+    }
+
+    const result = await personalLedgerService.start(lineUserId, rawText);
+    await clearPersonalLedgerPendingAction(chatId, lineUserId);
+    await refreshPersonalAccountingContext(event);
+    return result.status === "created"
+      ? formatPersonalLedgerStarted(result.ledger)
+      : formatPersonalLedgerAlreadyActive(result.ledger);
+  }
+
+  if (
+    rawText === "2" ||
+    rawText === "取消" ||
+    parsed.kind === "cancel"
+  ) {
+    await clearPersonalLedgerPendingAction(chatId, lineUserId);
+    return "已取消結束記帳。";
+  }
+
+  if (rawText !== "1" && rawText !== "確定結束" && rawText !== "確認") {
+    return "若要結束記帳請輸入「1」或「確定結束」，放棄請輸入「2」或「取消」。";
+  }
+
+  const targetLedgerId = pending.targetLedgerId;
+  await clearPersonalLedgerPendingAction(chatId, lineUserId);
+
+  if (!targetLedgerId) {
+    await clearMenuContext(chatId, lineUserId);
+    return getNoActivePersonalLedgerText();
+  }
+
+  const ended = await personalLedgerService.end(lineUserId, targetLedgerId);
+  await clearMenuContext(chatId, lineUserId);
+  return ended ? formatPersonalLedgerEnded(ended) : getNoActivePersonalLedgerText();
+}
+
+async function handlePersonalExpenseInput(
+  event: LineMessageEvent,
+  rawText: string
+) {
+  const { chatId, chatType, lineUserId } = getChatContext(event.source);
+  if (!lineUserId) {
+    return null;
+  }
+
+  const context = await getActiveMenuContext(chatId, lineUserId);
+  const menuMode = resolveMenuModeFromContext(context);
+  if (menuMode !== "personal-accounting") {
+    return null;
+  }
+
+  const activeLedger = await personalLedgerService.getCurrent(lineUserId);
+  if (
+    !shouldRoutePersonalExpense({
+      chatType,
+      menuMode,
+      hasActiveLedger: Boolean(activeLedger)
+    })
+  ) {
+    return null;
+  }
+
+  const parsed = parsePersonalExpenseMessage(rawText);
+  if (!parsed.ok) {
+    return formatPersonalExpenseValidationError(parsed.error);
+  }
+
+  try {
+    const result = await personalLedgerService.addExpenses(
+      lineUserId,
+      parsed.expenses
+    );
+    if (!result) {
+      return getNoActivePersonalLedgerText();
+    }
+
+    await refreshPersonalAccountingContext(event);
+    return formatPersonalExpenseRecorded(result);
+  } catch (error) {
+    console.error("Failed to persist personal expenses", {
+      lineUserId,
+      expenseCount: parsed.expenses.length,
+      error
+    });
+    return getPersonalExpenseSaveError();
+  }
 }
 
 async function handleCreateLedgerPrompt(event: LineMessageEvent) {
@@ -2131,12 +2450,33 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
       return "小二找不到你的 LINE 使用者資訊，請稍後再試。";
     }
 
+    let parsed = parseLineCommand(rawText);
+    const personalPendingReply = await handlePersonalLedgerPendingResponse(
+      event,
+      rawText,
+      parsed
+    );
+    if (personalPendingReply) {
+      return personalPendingReply;
+    }
+
+    parsed = await resolveContextualPersonalCommand(event, rawText, parsed);
+
+    if (isPersonalLedgerCommand(parsed)) {
+      return handlePersonalLedgerCommand(event, parsed);
+    }
+
+    if (parsed.kind === "ignored") {
+      const personalExpenseReply = await handlePersonalExpenseInput(event, rawText);
+      if (personalExpenseReply) {
+        return personalExpenseReply;
+      }
+    }
+
     const paymentReply = await handlePaymentSetupResponse(lineUserId, rawText);
     if (paymentReply) {
       return paymentReply;
     }
-
-    let parsed = parseLineCommand(rawText);
 
     if (parsed.kind === "xiaoer-help") {
       return showMenu(event, "xiaoer");
@@ -2148,6 +2488,10 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
 
     if (parsed.kind === "shortcut") {
       parsed = await resolveShortcutCommand(event, parsed.number, parsed.payload);
+    }
+
+    if (isPersonalLedgerCommand(parsed)) {
+      return handlePersonalLedgerCommand(event, parsed);
     }
 
     if (parsed.kind === "start-payment-setup") {
@@ -2474,6 +2818,15 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
 
     case "settlement-help":
       return showMenu(event, "settlement");
+
+    case "personal-ledger-menu":
+    case "personal-ledger-start":
+    case "personal-ledger-current":
+    case "personal-ledger-details":
+    case "personal-ledger-delete-last":
+    case "personal-ledger-end":
+    case "personal-ledger-history":
+      return "個人記帳請私訊小二使用；群組分帳功能不受影響。";
 
     case "current-settlement":
       return handleSettlement(event);

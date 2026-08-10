@@ -35,6 +35,13 @@ export type ParsedLineCommand =
   | { kind: "shortcut"; number: number; payload?: string }
   | { kind: "xiaoer-help" }
   | { kind: "settlement-help" }
+  | { kind: "personal-ledger-menu" }
+  | { kind: "personal-ledger-start" }
+  | { kind: "personal-ledger-current" }
+  | { kind: "personal-ledger-details" }
+  | { kind: "personal-ledger-delete-last" }
+  | { kind: "personal-ledger-end" }
+  | { kind: "personal-ledger-history" }
   | { kind: "current-settlement" }
   | { kind: "ledger-settlement" }
   | { kind: "mvp" }

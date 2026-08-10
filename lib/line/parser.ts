@@ -56,6 +56,34 @@ export function parseLineCommand(text: string): ParsedLineCommand {
   }
 
   if (
+    normalized === "記帳" ||
+    normalized === "個人記帳" ||
+    normalized === "隨身記帳"
+  ) {
+    return { kind: "personal-ledger-menu" };
+  }
+
+  if (normalized === "開始記帳") {
+    return { kind: "personal-ledger-start" };
+  }
+
+  if (normalized === "查看本次花費") {
+    return { kind: "personal-ledger-current" };
+  }
+
+  if (normalized === "刪除上一筆") {
+    return { kind: "delete-last-expense" };
+  }
+
+  if (normalized === "結束記帳") {
+    return { kind: "personal-ledger-end" };
+  }
+
+  if (normalized === "查看歷史記帳") {
+    return { kind: "personal-ledger-history" };
+  }
+
+  if (
     normalized === "查看目前結算" ||
     normalized === "目前結算" ||
     normalized === "結算"

@@ -10,7 +10,13 @@ function getExpiresAt() {
 }
 
 function toMenuContextType(mode: MenuMode): MenuContextType {
-  return mode === "xiaoer" ? MenuContextType.xiaoer : MenuContextType.settlement;
+  if (mode === "xiaoer") {
+    return MenuContextType.xiaoer;
+  }
+
+  return mode === "settlement"
+    ? MenuContextType.settlement
+    : MenuContextType.personal_accounting;
 }
 
 export async function rememberMenuContext(input: {
@@ -69,6 +75,19 @@ export async function getActiveMenuContext(chatId: string, lineUserId?: string) 
   });
 }
 
+export async function clearMenuContext(chatId: string, lineUserId?: string) {
+  if (!lineUserId) {
+    return;
+  }
+
+  await db.menuContext.deleteMany({
+    where: {
+      chatId,
+      requesterLineUserId: lineUserId
+    }
+  });
+}
+
 export function resolveMenuModeFromContext(
   context: Awaited<ReturnType<typeof getActiveMenuContext>>
 ) {
@@ -76,9 +95,15 @@ export function resolveMenuModeFromContext(
     return null;
   }
 
-  return context.menuType === MenuContextType.xiaoer ? "xiaoer" : "settlement";
+  if (context.menuType === MenuContextType.xiaoer) {
+    return "xiaoer";
+  }
+
+  return context.menuType === MenuContextType.settlement
+    ? "settlement"
+    : "personal-accounting";
 }
 
 export function getMenuContextExpiredPrompt() {
-  return "請先輸入「小二」或「算帳」，小二才知道大人要使用哪一套功能。";
+  return "請先輸入「小二」、「算帳」或「記帳」，小二才知道大人要使用哪一套功能。";
 }
