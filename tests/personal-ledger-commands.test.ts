@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import { getPersonalAccountingMenuText } from "../lib/personal-ledger/formatter.ts";
@@ -104,6 +105,31 @@ test("legacy numeric routing remains available outside personal context", () => 
       null
     );
   }
+});
+
+test("payment setup text is routed before generic personal expense input", () => {
+  const serviceSource = fs.readFileSync(
+    new URL("../lib/line/service.ts", import.meta.url),
+    "utf8"
+  );
+  const privateChatStart = serviceSource.indexOf('if (chatType === "user")');
+  const privateChatSource = serviceSource.slice(privateChatStart);
+  const personalNumericIndex = privateChatSource.indexOf(
+    "resolvePersonalAccountingNumericCommand({"
+  );
+  const paymentSetupIndex = privateChatSource.indexOf(
+    "handlePaymentSetupResponse(lineUserId, rawText)"
+  );
+  const personalExpenseIndex = privateChatSource.indexOf(
+    "handlePersonalExpenseInput(event, rawText)"
+  );
+
+  assert.ok(privateChatStart >= 0);
+  assert.ok(personalNumericIndex >= 0);
+  assert.ok(paymentSetupIndex >= 0);
+  assert.ok(personalExpenseIndex >= 0);
+  assert.ok(personalNumericIndex < paymentSetupIndex);
+  assert.ok(paymentSetupIndex < personalExpenseIndex);
 });
 
 test("explicit lifecycle commands route to personal accounting", () => {

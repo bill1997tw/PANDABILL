@@ -2484,16 +2484,16 @@ async function handleMessageEvent(event: LineMessageEvent): Promise<LineTextRepl
       return handlePersonalLedgerCommand(event, parsed);
     }
 
+    const paymentReply = await handlePaymentSetupResponse(lineUserId, rawText);
+    if (paymentReply) {
+      return paymentReply;
+    }
+
     if (parsed.kind === "ignored") {
       const personalExpenseReply = await handlePersonalExpenseInput(event, rawText);
       if (personalExpenseReply) {
         return personalExpenseReply;
       }
-    }
-
-    const paymentReply = await handlePaymentSetupResponse(lineUserId, rawText);
-    if (paymentReply) {
-      return paymentReply;
     }
 
     if (parsed.kind === "xiaoer-help") {
